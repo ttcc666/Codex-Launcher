@@ -1,0 +1,34 @@
+# Logs and runtime artifacts
+logs/
+codex-launcher.exe
+*.log
+/run.lock
+
+# Node.js
+ui/node_modules/
+ui/dist/
+ui/.env
+ui/.env.local
+
+# Rust / Tauri
+src-tauri/target/
+src-tauri/**/*.rs.bk
+src-tauri/gen/
+
+# System / OS
+.DS_Store
+Thumbs.db
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# IDEs
+.vscode/
+.idea/
+*.iml
+
+# Old WPF stuff just in case
+wpf/
+ui_vanilla/

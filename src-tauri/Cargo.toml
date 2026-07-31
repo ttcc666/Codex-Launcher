@@ -1,0 +1,43 @@
+[package]
+name = "codex-launcher"
+version = "2.0.0"
+description = "Codex 重试可视化启动器 (Rust + Tauri 原生集成版)"
+authors = ["Codex Team"]
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[build-dependencies]
+tauri-build = { version = "2.0", features = [] }
+
+[dependencies]
+tauri = { version = "2.0", features = [] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml = "0.8"
+tokio = { version = "1.0", features = ["full"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+chrono = { version = "0.4", features = ["serde"] }
+url = "2.5"
+uuid = { version = "1.18", features = ["v4"] }
+fs2 = "0.4"
+futures-util = "0.3"
+async-trait = "0.1"
+
+open = "5.0"
+dirs = "5.0"
+
+tauri-plugin-dialog = "2.0"
+command-group = { version = "5.0.1", features = ["with-tokio"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Globalization", "Win32_Storage_FileSystem"] }
+
+[dev-dependencies]
+tempfile = "3.20"
+tokio = { version = "1.0", features = ["test-util"] }
+
+[features]
+# default custom-protocol
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]

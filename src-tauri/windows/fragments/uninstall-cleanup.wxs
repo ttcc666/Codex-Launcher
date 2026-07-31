@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Fragment>
+    <!--
+      Tauri 2's generated WiX template gives the installed main executable
+      the stable File Id "Path". Run cleanup before RemoveFiles while that
+      executable is still present. Return="ignore" keeps uninstall usable;
+      the executable records cleanup failures in logs/uninstall.log.
+    -->
+    <CustomAction
+      Id="CleanupCodexLauncherScheduledTask"
+      FileKey="Path"
+      ExeCommand="--uninstall-cleanup"
+      Execute="immediate"
+      Return="ignore" />
+    <InstallExecuteSequence>
+      <Custom
+        Action="CleanupCodexLauncherScheduledTask"
+        Before="RemoveFiles"><![CDATA[(REMOVE = "ALL") AND NOT UPGRADINGPRODUCTCODE]]></Custom>
+    </InstallExecuteSequence>
+  </Fragment>
+</Wix>
