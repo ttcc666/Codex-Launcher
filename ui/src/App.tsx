@@ -21,6 +21,7 @@ import { toast } from "sonner"
 
 
 import { ModeToggle } from "@/components/mode-toggle"
+import { ShinyText } from "@/components/ui/ShinyText"
 import {
   AlertDialog,
   AlertDialogAction,
@@ -426,33 +427,47 @@ export default function App() {
   }
 
   return (
-    <div className="min-h-screen bg-background font-sans text-foreground antialiased">
-      <header className="border-b bg-background/80 backdrop-blur sticky top-0 z-50">
-        <div className="container mx-auto flex h-14 items-center px-4 md:px-6">
-          <div className="flex items-center gap-2.5 font-bold tracking-tight">
-            <div className="rounded-lg bg-emerald-500/10 p-1.5 text-emerald-400 border border-emerald-500/20">
-              <CpuIcon className="size-5" />
+    <div className="relative min-h-screen bg-background font-sans text-foreground antialiased overflow-x-hidden">
+      {/* React Bits Ambient Aurora & Cyber Grid Background */}
+      <div className="pointer-events-none fixed inset-0 z-0 overflow-hidden select-none">
+        {/* Cyber Grid Pattern */}
+        <div className="absolute inset-0 bg-grid-pattern opacity-20 dark:opacity-40" />
+        
+        {/* Ambient Aurora Blobs */}
+        <div className="aurora-blob-1 absolute -top-[15%] -left-[10%] h-[550px] w-[550px] rounded-full bg-emerald-500/5 dark:bg-emerald-500/10 blur-[130px]" />
+        <div className="aurora-blob-2 absolute top-[35%] -right-[10%] h-[650px] w-[650px] rounded-full bg-purple-500/5 dark:bg-purple-500/10 blur-[150px]" />
+        <div className="aurora-blob-1 absolute -bottom-[15%] left-[20%] h-[450px] w-[450px] rounded-full bg-sky-500/5 dark:bg-sky-500/10 blur-[130px]" />
+      </div>
+
+      <div className="relative z-10">
+        <header className="border-b bg-background/80 backdrop-blur sticky top-0 z-50">
+          <div className="container mx-auto flex h-14 items-center px-4 md:px-6">
+            <div className="flex items-center gap-2.5 font-bold tracking-tight">
+              <div className="rounded-lg bg-emerald-500/10 p-1.5 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20 shadow-[0_0_10px_rgba(16,185,129,0.15)]">
+                <CpuIcon className="size-5" />
+              </div>
+              <ShinyText text="Codex Launcher" speed={6} className="text-base font-semibold" />
+              <span className="text-[11px] font-mono font-normal text-muted-foreground bg-muted px-2 py-0.5 rounded-full border">
+                v2.0
+              </span>
             </div>
-            <span className="text-base font-semibold">Codex Launcher</span>
-            <span className="text-[11px] font-mono font-normal text-muted-foreground bg-muted px-2 py-0.5 rounded-full border">
-              v2.0
-            </span>
-          </div>
 
-          <div className="ml-auto flex items-center gap-3">
-            {statusBadge(state.status)}
-            <div className="h-4 w-[1px] bg-border" />
-            <ModeToggle />
+            <div className="ml-auto flex items-center gap-3">
+              {statusBadge(state.status)}
+              <div className="h-4 w-[1px] bg-border" />
+              <ModeToggle />
+            </div>
           </div>
-        </div>
-      </header>
+        </header>
 
-      <main className="container mx-auto flex flex-col gap-8 p-4 md:p-6 lg:p-8">
-        <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-          <div>
-            <h1 className="text-3xl font-bold tracking-tight">Dashboard</h1>
-            <p className="mt-1 text-sm text-muted-foreground">Codex 重试引擎控制中心</p>
-          </div>
+        <main className="container mx-auto flex flex-col gap-8 p-4 md:p-6 lg:p-8">
+          <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <h1 className="text-3xl font-bold tracking-tight">
+                <ShinyText text="Dashboard" speed={5} />
+              </h1>
+              <p className="mt-1 text-sm text-muted-foreground">Codex 重试引擎控制中心</p>
+            </div>
           <div className="flex items-center gap-2">
             {!state.isRunning ? (
               <Button
@@ -487,16 +502,16 @@ export default function App() {
         </div>
 
         <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
-          <MetricCard title="系统状态" icon={<ActivityIcon className="size-4 text-muted-foreground" />}>
+          <MetricCard title="系统状态" icon={<ActivityIcon className="size-4 text-zinc-800 dark:text-zinc-200" />}>
             {statusBadge(state.status)}
           </MetricCard>
-          <MetricCard title="重试次数" icon={<ZapIcon className="size-4 text-muted-foreground" />}>
+          <MetricCard title="重试次数" icon={<ZapIcon className="size-4 text-zinc-800 dark:text-zinc-200" />}>
             {state.attempt}
           </MetricCard>
-          <MetricCard title="拦截拥堵请求" icon={<ServerCrashIcon className="size-4 text-muted-foreground" />}>
+          <MetricCard title="拦截拥堵请求" icon={<ServerCrashIcon className="size-4 text-zinc-800 dark:text-zinc-200" />}>
             {state.highDemandCount}
           </MetricCard>
-          <MetricCard title="运行时长" icon={<TimerIcon className="size-4 text-muted-foreground" />} mono>
+          <MetricCard title="运行时长" icon={<TimerIcon className="size-4 text-zinc-800 dark:text-zinc-200" />} mono>
             {state.elapsedText}
           </MetricCard>
         </div>
@@ -835,6 +850,7 @@ export default function App() {
           </TabsContent>
         </Tabs>
       </main>
+      </div>
     </div>
   )
 }
@@ -851,17 +867,19 @@ function MetricCard({
   mono?: boolean
 }) {
   return (
-    <Card className="transition-all duration-300 hover:-translate-y-1 hover:shadow-lg hover:shadow-emerald-500/10 hover:border-emerald-500/30 group">
-      <CardHeader className="flex-row items-center justify-between pb-2">
-        <CardTitle className="text-sm font-medium text-muted-foreground">{title}</CardTitle>
-        <div className="rounded-lg bg-muted/70 p-1.5 transition-colors group-hover:bg-emerald-500/10 group-hover:text-emerald-400">
-          {icon}
+    <div className="group relative overflow-hidden rounded-xl border border-zinc-700/80 dark:border-zinc-800 bg-white dark:bg-zinc-950 p-4 sm:p-5 transition-all duration-200 hover:border-zinc-900 dark:hover:border-zinc-700 hover:shadow-md">
+      <div className="flex items-center justify-between">
+        <span className="text-xs font-semibold tracking-wide text-zinc-800 dark:text-zinc-200">{title}</span>
+      </div>
+      <div className="mt-2.5 text-zinc-800 dark:text-zinc-200">
+        {icon}
+      </div>
+      <div className="mt-4 flex items-baseline">
+        <div className={cn("text-2xl font-bold tracking-tight text-zinc-900 dark:text-zinc-100", mono && "font-mono")}>
+          {children}
         </div>
-      </CardHeader>
-      <CardContent>
-        <div className={cn("text-2xl font-bold tracking-tight", mono && "font-mono")}>{children}</div>
-      </CardContent>
-    </Card>
+      </div>
+    </div>
   )
 }
 
@@ -869,7 +887,7 @@ function statusBadge(status: "idle" | "starting" | "running" | "success" | "fail
   switch (status) {
     case "running":
       return (
-        <div className="inline-flex items-center gap-2 rounded-full border border-emerald-500/40 bg-emerald-500/10 px-3 py-1 text-xs font-semibold text-emerald-400 shadow-[0_0_12px_rgba(16,185,129,0.25)]">
+        <div className="inline-flex items-center gap-2 rounded-full border border-emerald-500/40 bg-emerald-500/10 px-3 py-1 text-xs font-semibold text-emerald-600 dark:text-emerald-400 shadow-[0_0_12px_rgba(16,185,129,0.2)]">
           <span className="relative flex h-2.5 w-2.5">
             <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-75" />
             <span className="relative inline-flex h-2.5 w-2.5 rounded-full bg-emerald-500" />
@@ -879,7 +897,7 @@ function statusBadge(status: "idle" | "starting" | "running" | "success" | "fail
       )
     case "starting":
       return (
-        <div className="inline-flex items-center gap-2 rounded-full border border-sky-500/40 bg-sky-500/10 px-3 py-1 text-xs font-semibold text-sky-400 shadow-[0_0_12px_rgba(56,189,248,0.25)]">
+        <div className="inline-flex items-center gap-2 rounded-full border border-sky-500/40 bg-sky-500/10 px-3 py-1 text-xs font-semibold text-sky-600 dark:text-sky-400 shadow-[0_0_12px_rgba(56,189,248,0.2)]">
           <span className="relative flex h-2.5 w-2.5">
             <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-sky-400 opacity-75" />
             <span className="relative inline-flex h-2.5 w-2.5 rounded-full bg-sky-500" />
@@ -889,14 +907,14 @@ function statusBadge(status: "idle" | "starting" | "running" | "success" | "fail
       )
     case "success":
       return (
-        <div className="inline-flex items-center gap-2 rounded-full border border-emerald-600/30 bg-emerald-950/30 px-3 py-1 text-xs font-semibold text-emerald-300">
-          <span className="h-2 w-2 rounded-full bg-emerald-400" />
+        <div className="inline-flex items-center gap-2 rounded-full border border-emerald-600/30 bg-emerald-500/10 px-3 py-1 text-xs font-semibold text-emerald-700 dark:text-emerald-300">
+          <span className="h-2 w-2 rounded-full bg-emerald-500" />
           <span>已完成</span>
         </div>
       )
     case "failed":
       return (
-        <div className="inline-flex items-center gap-2 rounded-full border border-rose-500/40 bg-rose-500/10 px-3 py-1 text-xs font-semibold text-rose-400 shadow-[0_0_12px_rgba(244,63,94,0.25)]">
+        <div className="inline-flex items-center gap-2 rounded-full border border-rose-500/40 bg-rose-500/10 px-3 py-1 text-xs font-semibold text-rose-600 dark:text-rose-400 shadow-[0_0_12px_rgba(244,63,94,0.2)]">
           <span className="relative flex h-2.5 w-2.5">
             <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-rose-400 opacity-75" />
             <span className="relative inline-flex h-2.5 w-2.5 rounded-full bg-rose-500" />
@@ -906,15 +924,15 @@ function statusBadge(status: "idle" | "starting" | "running" | "success" | "fail
       )
     case "stopped":
       return (
-        <div className="inline-flex items-center gap-2 rounded-full border border-amber-500/40 bg-amber-500/10 px-3 py-1 text-xs font-semibold text-amber-300">
-          <span className="h-2 w-2 rounded-full bg-amber-400" />
+        <div className="inline-flex items-center gap-2 rounded-full border border-amber-500/40 bg-amber-500/10 px-3 py-1 text-xs font-semibold text-amber-700 dark:text-amber-300">
+          <span className="h-2 w-2 rounded-full bg-amber-500" />
           <span>已停止</span>
         </div>
       )
     default:
       return (
-        <div className="inline-flex items-center gap-2 rounded-full border border-zinc-700/60 bg-zinc-900 px-3 py-1 text-xs font-medium text-zinc-400">
-          <span className="h-2 w-2 rounded-full bg-zinc-500" />
+        <div className="inline-flex items-center gap-2 rounded-full border border-zinc-300 dark:border-zinc-700/60 bg-zinc-100 dark:bg-zinc-900 px-3 py-1 text-xs font-medium text-zinc-600 dark:text-zinc-400">
+          <span className="h-2 w-2 rounded-full bg-zinc-400" />
           <span>待机 / 未运行</span>
         </div>
       )

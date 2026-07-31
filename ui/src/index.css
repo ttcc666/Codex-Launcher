@@ -92,3 +92,65 @@
 .terminal-scrollbar::-webkit-scrollbar-thumb:hover {
   background: rgba(113, 113, 122, 0.8);
 }
+
+/* Ambient Aurora Background (React Bits 风格) */
+@keyframes aurora-1 {
+  0% {
+    transform: translate(0px, 0px) scale(1) rotate(0deg);
+  }
+  33% {
+    transform: translate(60px, -40px) scale(1.15) rotate(120deg);
+  }
+  66% {
+    transform: translate(-40px, 50px) scale(0.9) rotate(240deg);
+  }
+  100% {
+    transform: translate(0px, 0px) scale(1) rotate(360deg);
+  }
+}
+
+@keyframes aurora-2 {
+  0% {
+    transform: translate(0px, 0px) scale(1) rotate(0deg);
+  }
+  33% {
+    transform: translate(-50px, 60px) scale(1.1) rotate(-120deg);
+  }
+  66% {
+    transform: translate(50px, -30px) scale(0.95) rotate(-240deg);
+  }
+  100% {
+    transform: translate(0px, 0px) scale(1) rotate(-360deg);
+  }
+}
+
+.aurora-blob-1 {
+  animation: aurora-1 18s ease-in-out infinite alternate;
+}
+
+.aurora-blob-2 {
+  animation: aurora-2 22s ease-in-out infinite alternate;
+}
+
+/* React Bits Cyber Grid Background */
+.bg-grid-pattern {
+  background-size: 36px 36px;
+  background-image: 
+    linear-gradient(to right, rgba(255, 255, 255, 0.035) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(255, 255, 255, 0.035) 1px, transparent 1px);
+}
+
+/* React Bits Shiny Text */
+@keyframes shiny-text {
+  0% {
+    background-position: -200% 0;
+  }
+  100% {
+    background-position: 200% 0;
+  }
+}
+
+.animate-shiny-text {
+  background-size: 200% auto;
+  animation: shiny-text 5s linear infinite;
+}
