@@ -35,6 +35,15 @@ export interface AppConfig {
   allowedBaseUrls: string
   keepAlive: boolean
   keepAliveIntervalMinutes: number
+  serverChan: ServerChanConfig
+}
+
+export interface ServerChanConfig {
+  enabled: boolean
+}
+
+export interface ServerChanCredentialStatus {
+  configured: boolean
 }
 
 export type RunStatus =
@@ -59,6 +68,7 @@ export interface TaskStatus {
   logFile: string
   latestLog: string
   attempt: number
+  retryCount: number
   highDemandCount: number
   maxTries: number
   intervalSeconds: number
@@ -99,6 +109,9 @@ const initialConfig: AppConfig = {
   allowedBaseUrls: "",
   keepAlive: false,
   keepAliveIntervalMinutes: 5,
+  serverChan: {
+    enabled: false,
+  },
 }
 
 export function useTauri() {

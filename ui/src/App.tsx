@@ -4,13 +4,16 @@ import { useVirtualizer } from "@tanstack/react-virtual"
 import {
   ActivityIcon,
   AlertTriangleIcon,
+  BellIcon,
   CpuIcon,
   ExternalLinkIcon,
   FileTerminalIcon,
   FolderOpenIcon,
+  KeyRoundIcon,
   PlayIcon,
   SearchIcon,
   ServerCrashIcon,
+  SendIcon,
   SquareIcon,
   TimerIcon,
   Trash2Icon,
@@ -50,7 +53,11 @@ import { Spinner } from "@/components/ui/spinner"
 import { Switch } from "@/components/ui/switch"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { validateConfig } from "@/hooks/configValidation"
-import { useTauri, type AppConfig } from "@/hooks/useTauri"
+import {
+  useTauri,
+  type AppConfig,
+  type ServerChanCredentialStatus,
+} from "@/hooks/useTauri"
 import { cn } from "@/lib/utils"
 
 type LogLevel = "error" | "warn" | "success" | "info" | "rate_limit" | "default"
@@ -261,6 +268,14 @@ export default function App() {
   const [historyDialogOpen, setHistoryDialogOpen] = useState(false)
   const [logFilter, setLogFilter] = useState("")
   const [onlyErrors, setOnlyErrors] = useState(false)
+  const [serverChanStatus, setServerChanStatus] = useState<ServerChanCredentialStatus>({
+    configured: false,
+  })
+  const [serverChanSendKey, setServerChanSendKey] = useState("")
+  const [serverChanAction, setServerChanAction] = useState<
+    "loading" | "saving" | "testing" | "deleting"
+  >()
+  const [serverChanLastResult, setServerChanLastResult] = useState("")
   const scrollViewportRef = useRef<HTMLDivElement>(null)
 
   const validationErrors = useMemo(() => validateConfig(config), [config])
@@ -331,6 +346,24 @@ export default function App() {
   }, [state.runId])
 
   useEffect(() => {
+    let disposed = false
+    setServerChanAction("loading")
+    invoke<ServerChanCredentialStatus>("get_server_chan_status")
+      .then((status) => {
+        if (!disposed) setServerChanStatus(status)
+      })
+      .catch((error: unknown) => {
+        if (!disposed) showActionError("读取 Server酱凭据状态失败", error)
+      })
+      .finally(() => {
+        if (!disposed) setServerChanAction(undefined)
+      })
+    return () => {
+      disposed = true
+    }
+  }, [])
+
+  useEffect(() => {
     if (!autoScroll || filteredLogs.length === 0) return
 
     logVirtualizer.scrollToIndex(filteredLogs.length - 1, { align: "end" })
@@ -357,6 +390,68 @@ export default function App() {
     key: Key,
     value: AppConfig[Key],
   ) => setConfig((current) => ({ ...current, [key]: value }))
+
+  const setServerChanEnabled = (enabled: boolean) =>
+    setConfig((current) => ({
+      ...current,
+      serverChan: { enabled },
+    }))
+
+  const saveServerChanSendKey = async () => {
+    if (!serverChanSendKey.trim()) {
+      toast.error("SendKey 不能为空")
+      return
+    }
+    setServerChanAction("saving")
+    try {
+      const status = await invoke<ServerChanCredentialStatus>("set_server_chan_send_key", {
+        sendKey: serverChanSendKey,
+      })
+      setServerChanStatus(status)
+      setServerChanSendKey("")
+      setServerChanLastResult("凭据已保存到 Windows Credential Manager")
+      toast.success("Server酱 SendKey 已安全保存")
+    } catch (error: unknown) {
+      showActionError("保存 Server酱 SendKey 失败", error)
+    } finally {
+      setServerChanAction(undefined)
+    }
+  }
+
+  const testServerChanNotification = async () => {
+    setServerChanAction("testing")
+    try {
+      const message = await invoke<string>("test_server_chan_notification")
+      setServerChanLastResult(message)
+      toast.success("个人微信测试通知已发送", { description: message })
+    } catch (error: unknown) {
+      const message = actionErrorMessage(error)
+      if (message.includes("通知可能已送达")) {
+        setServerChanLastResult(message)
+        toast.warning("测试通知发送结果未确认", { description: message })
+      } else {
+        setServerChanLastResult("")
+        showActionError("发送测试通知失败", error)
+      }
+    } finally {
+      setServerChanAction(undefined)
+    }
+  }
+
+  const deleteServerChanSendKey = async () => {
+    setServerChanAction("deleting")
+    try {
+      const status = await invoke<ServerChanCredentialStatus>("delete_server_chan_send_key")
+      setServerChanStatus(status)
+      setServerChanSendKey("")
+      setServerChanLastResult("Server酱凭据已删除")
+      toast.success("Server酱凭据已删除")
+    } catch (error: unknown) {
+      showActionError("删除 Server酱凭据失败", error)
+    } finally {
+      setServerChanAction(undefined)
+    }
+  }
 
   const setCurrentRetryKeepAlive = async (checked: boolean) => {
     if (!isRetryRunActive || !state.runId) return
@@ -665,10 +760,11 @@ export default function App() {
         </div>
 
         <Tabs defaultValue="logs" className="w-full">
-          <TabsList className="grid w-full max-w-[400px] grid-cols-3">
+          <TabsList className="grid w-full max-w-[520px] grid-cols-4">
             <TabsTrigger value="config">配置参数</TabsTrigger>
             <TabsTrigger value="logs">实时终端</TabsTrigger>
             <TabsTrigger value="task">计划任务</TabsTrigger>
+            <TabsTrigger value="notifications">通知</TabsTrigger>
           </TabsList>
 
           <TabsContent value="config" className="mt-4">
@@ -793,6 +889,138 @@ export default function App() {
                     <FieldError>{validationErrors.keepAliveIntervalMinutes}</FieldError>
                   </Field>
                 </FieldGroup>
+              </CardContent>
+            </Card>
+          </TabsContent>
+
+          <TabsContent value="notifications" className="mt-4">
+            <Card>
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2">
+                  <BellIcon className="size-4" />
+                  个人微信通知
+                </CardTitle>
+                <CardDescription>
+                  通过 Server酱 Turbo 发送重试流程首次成功通知。
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="flex flex-col gap-6">
+                <div className="flex flex-col gap-4 rounded-lg border bg-muted/50 p-4 sm:flex-row sm:items-center sm:justify-between">
+                  <div className="flex min-w-0 flex-col gap-1">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <p className="font-medium">通知状态</p>
+                      <Badge variant={serverChanStatus.configured ? "default" : "outline"}>
+                        {serverChanStatus.configured ? "凭据已配置" : "凭据未配置"}
+                      </Badge>
+                    </div>
+                    <p className="text-xs text-muted-foreground">
+                      SendKey 保存在 Windows Credential Manager，不写入应用配置。
+                    </p>
+                  </div>
+                  <div className="flex shrink-0 items-center gap-2">
+                    <Switch
+                      id="serverChanEnabled"
+                      checked={config.serverChan.enabled}
+                      onCheckedChange={setServerChanEnabled}
+                    />
+                    <label htmlFor="serverChanEnabled" className="cursor-pointer text-sm font-medium">
+                      启用通知
+                    </label>
+                  </div>
+                </div>
+
+                <Field>
+                  <FieldLabel htmlFor="serverChanSendKey">Server酱 SendKey</FieldLabel>
+                  <div className="flex flex-col gap-2 sm:flex-row">
+                    <Input
+                      id="serverChanSendKey"
+                      type="password"
+                      autoComplete="off"
+                      value={serverChanSendKey}
+                      onChange={(event) => setServerChanSendKey(event.currentTarget.value)}
+                      placeholder={serverChanStatus.configured ? "输入新 SendKey 可覆盖现有凭据" : "SCT..."}
+                      disabled={Boolean(serverChanAction)}
+                    />
+                    <Button
+                      onClick={() => void saveServerChanSendKey()}
+                      disabled={Boolean(serverChanAction) || !serverChanSendKey.trim()}
+                      className="sm:min-w-[112px]"
+                    >
+                      {serverChanAction === "saving" ? (
+                        <Spinner data-icon="inline-start" />
+                      ) : (
+                        <KeyRoundIcon data-icon="inline-start" />
+                      )}
+                      保存凭据
+                    </Button>
+                  </div>
+                </Field>
+
+                <div className="rounded-lg border bg-muted/30 p-4">
+                  <p className="text-sm font-medium">唯一发送条件</p>
+                  <p className="mt-1 text-xs leading-5 text-muted-foreground">
+                    普通 retry 流程首次出现成功结果时发送一次，无论成功发生在 Attempt 1
+                    还是后续重试。最终失败、停止和独立 manual keep-alive 不发送；“本次保活”
+                    的后续 cycle 不重复发送。
+                  </p>
+                </div>
+
+                <div className="flex flex-col gap-3 border-t pt-4 sm:flex-row sm:items-center sm:justify-between">
+                  <div className="min-h-5 min-w-0 text-xs text-muted-foreground">
+                    {serverChanLastResult || "尚未发送测试通知"}
+                  </div>
+                  <div className="flex shrink-0 flex-wrap gap-2">
+                    <Button
+                      variant="outline"
+                      onClick={() => void testServerChanNotification()}
+                      disabled={Boolean(serverChanAction) || !serverChanStatus.configured}
+                    >
+                      {serverChanAction === "testing" ? (
+                        <Spinner data-icon="inline-start" />
+                      ) : (
+                        <SendIcon data-icon="inline-start" />
+                      )}
+                      发送测试
+                    </Button>
+                    <AlertDialog>
+                      <AlertDialogTrigger
+                        render={
+                          <Button
+                            variant="destructive"
+                            disabled={Boolean(serverChanAction) || !serverChanStatus.configured}
+                          />
+                        }
+                      >
+                        {serverChanAction === "deleting" ? (
+                          <Spinner data-icon="inline-start" />
+                        ) : (
+                          <Trash2Icon data-icon="inline-start" />
+                        )}
+                        删除凭据
+                      </AlertDialogTrigger>
+                      <AlertDialogContent>
+                        <AlertDialogHeader>
+                          <AlertDialogMedia>
+                            <KeyRoundIcon />
+                          </AlertDialogMedia>
+                          <AlertDialogTitle>删除 Server酱凭据？</AlertDialogTitle>
+                          <AlertDialogDescription>
+                            删除后通知配置仍会保留，但在重新保存 SendKey 前无法发送微信消息。
+                          </AlertDialogDescription>
+                        </AlertDialogHeader>
+                        <AlertDialogFooter>
+                          <AlertDialogCancel>取消</AlertDialogCancel>
+                          <AlertDialogAction
+                            variant="destructive"
+                            onClick={() => void deleteServerChanSendKey()}
+                          >
+                            删除凭据
+                          </AlertDialogAction>
+                        </AlertDialogFooter>
+                      </AlertDialogContent>
+                    </AlertDialog>
+                  </div>
+                </div>
               </CardContent>
             </Card>
           </TabsContent>
@@ -1132,6 +1360,10 @@ function firstValidationError(errors: Record<string, string | undefined>): strin
   return Object.values(errors).find(Boolean) ?? "请检查标红字段"
 }
 
+function actionErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
+}
+
 function showActionError(title: string, error: unknown) {
-  toast.error(title, { description: error instanceof Error ? error.message : String(error) })
+  toast.error(title, { description: actionErrorMessage(error) })
 }

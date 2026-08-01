@@ -9,6 +9,12 @@ pub const MAX_INTERVAL_SECONDS: u64 = 86_400;
 pub const MAX_TRIES_LIMIT: u64 = 100_000;
 pub const MAX_KEEP_ALIVE_INTERVAL_MINUTES: u64 = 24 * 60;
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default, rename_all = "camelCase")]
+pub struct ServerChanConfig {
+    pub enabled: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default, rename_all = "camelCase")]
 pub struct AppConfig {
@@ -22,6 +28,7 @@ pub struct AppConfig {
     pub allowed_base_urls: String,
     pub keep_alive: bool,
     pub keep_alive_interval_minutes: u64,
+    pub server_chan: ServerChanConfig,
 }
 
 impl Default for AppConfig {
@@ -37,6 +44,7 @@ impl Default for AppConfig {
             allowed_base_urls: String::new(),
             keep_alive: false,
             keep_alive_interval_minutes: 5,
+            server_chan: ServerChanConfig::default(),
         }
     }
 }
@@ -310,6 +318,20 @@ mod tests {
 
         assert_eq!(loaded.config_version, CURRENT_CONFIG_VERSION);
         assert_eq!(loaded.command, "cmd /c exit 0");
+        assert_eq!(loaded.server_chan, ServerChanConfig::default());
+    }
+
+    #[test]
+    fn serialized_config_never_contains_a_server_chan_send_key() {
+        let temp = tempfile::tempdir().expect("create temp dir");
+        let mut config = valid_config(temp.path());
+        config.server_chan.enabled = true;
+
+        let serialized = serde_json::to_string(&config).expect("serialize config");
+
+        assert!(serialized.contains("serverChan"));
+        assert!(!serialized.to_ascii_lowercase().contains("sendkey"));
+        assert!(!serialized.to_ascii_lowercase().contains("send_key"));
     }
 
     #[tokio::test]

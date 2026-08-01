@@ -14,6 +14,9 @@ const validConfig: AppConfig = {
   allowedBaseUrls: "https://example.com/API",
   keepAlive: false,
   keepAliveIntervalMinutes: 5,
+  serverChan: {
+    enabled: false,
+  },
 }
 
 describe("config validation", () => {
@@ -47,5 +50,16 @@ describe("config validation", () => {
         allowedBaseUrls: "https://user:secret@example.com/api",
       }).allowedBaseUrls,
     ).toBeTruthy()
+  })
+
+  it("keeps Server酱 SendKey outside the autosaved config model", () => {
+    const serialized = JSON.stringify({
+      ...validConfig,
+      serverChan: { ...validConfig.serverChan, enabled: true },
+    })
+
+    expect(serialized).toContain('"serverChan"')
+    expect(serialized.toLowerCase()).not.toContain("sendkey")
+    expect(serialized.toLowerCase()).not.toContain("send_key")
   })
 })

@@ -21,6 +21,7 @@ pub struct AppPaths {
     pub keep_alive_request: PathBuf,
     pub crash_log: PathBuf,
     pub headless_log: PathBuf,
+    pub notifications_log: PathBuf,
     pub uninstall_log: PathBuf,
     pub webview_data_dir: PathBuf,
 }
@@ -44,6 +45,7 @@ impl AppPaths {
             keep_alive_request: root_dir.join("keep-alive-request.json"),
             crash_log: logs_dir.join("crash.log"),
             headless_log: logs_dir.join("headless.log"),
+            notifications_log: logs_dir.join("notifications.log"),
             uninstall_log: logs_dir.join("uninstall.log"),
             latest_log: logs_dir.join("latest.log"),
             webview_data_dir: root_dir.join("webview2"),

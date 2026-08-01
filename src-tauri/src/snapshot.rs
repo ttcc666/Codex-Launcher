@@ -233,6 +233,7 @@ mod tests {
                 .to_string(),
             latest_log: paths.latest_log.to_string_lossy().to_string(),
             attempt: 1,
+            retry_count: 0,
             high_demand_count: 0,
             max_tries: 1,
             interval_seconds: 1,

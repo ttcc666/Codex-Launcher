@@ -5,8 +5,11 @@
 
 mod app_storage;
 mod config_manager;
+mod credential_store;
+mod notifications;
 mod retry_engine;
 mod run_manager;
+mod server_chan;
 mod snapshot;
 mod status_store;
 mod task_scheduler;
@@ -14,6 +17,8 @@ mod windows_text;
 
 use app_storage::{append_bounded_text_log, read_json, AppPaths};
 use config_manager::{load_config, save_config as save_config_file, AppConfig};
+use credential_store::{CredentialStore, WindowsCredentialStore};
+use notifications::{NotificationService, ServerChanCredentialStatus};
 use retry_engine::{clear_history_logs, start_run, RunMode, RunOptions, RunStatus, TaskStatus};
 use run_manager::{KeepAliveTarget, RunManager, ShutdownWaitResult, StopTarget};
 use snapshot::{read_snapshot, SnapshotRequest, SnapshotResponse};
@@ -34,6 +39,7 @@ struct AppState {
     paths: AppPaths,
     default_work_dir: PathBuf,
     run_manager: Arc<RunManager>,
+    notification_service: Arc<NotificationService>,
 }
 
 #[tauri::command]
@@ -47,14 +53,51 @@ async fn save_app_config(config: AppConfig, state: State<'_, AppState>) -> Resul
 }
 
 #[tauri::command]
+async fn get_server_chan_status(
+    state: State<'_, AppState>,
+) -> Result<ServerChanCredentialStatus, String> {
+    state.notification_service.credential_status().await
+}
+
+#[tauri::command]
+async fn set_server_chan_send_key(
+    send_key: String,
+    state: State<'_, AppState>,
+) -> Result<ServerChanCredentialStatus, String> {
+    state.notification_service.set_send_key(send_key).await
+}
+
+#[tauri::command]
+async fn delete_server_chan_send_key(
+    state: State<'_, AppState>,
+) -> Result<ServerChanCredentialStatus, String> {
+    state.notification_service.delete_send_key().await
+}
+
+#[tauri::command]
+async fn test_server_chan_notification(state: State<'_, AppState>) -> Result<String, String> {
+    state.notification_service.test_notification().await
+}
+
+#[tauri::command]
 async fn start_retry(
     config: AppConfig,
     app_handle: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<String, String> {
     save_config_file(&state.paths, &config).await?;
-    let options = run_options_from_config(config);
-    start_gui_run(app_handle, &state, options).await
+    let notification_settings = config.server_chan.clone();
+    let options = run_options_from_config(config, &state.notification_service);
+    match start_gui_run(app_handle, &state, options).await {
+        Ok(run_id) => Ok(run_id),
+        Err(error) => {
+            state
+                .notification_service
+                .notify_start_failure(notification_settings, &error)
+                .await;
+            Err(error)
+        }
+    }
 }
 
 #[tauri::command]
@@ -64,12 +107,22 @@ async fn start_manual_keep_alive(
     state: State<'_, AppState>,
 ) -> Result<String, String> {
     save_config_file(&state.paths, &config).await?;
+    let notification_settings = config.server_chan.clone();
     let keep_alive_interval =
         Duration::from_secs(config.keep_alive_interval_minutes.saturating_mul(60));
-    let options = run_options_from_config(config)
+    let options = run_options_from_config(config, &state.notification_service)
         .with_keep_alive(true, keep_alive_interval)
         .with_run_mode(RunMode::ManualKeepAlive);
-    start_gui_run(app_handle, &state, options).await
+    match start_gui_run(app_handle, &state, options).await {
+        Ok(run_id) => Ok(run_id),
+        Err(error) => {
+            state
+                .notification_service
+                .notify_start_failure(notification_settings, &error)
+                .await;
+            Err(error)
+        }
+    }
 }
 
 async fn start_gui_run(
@@ -194,7 +247,11 @@ async fn select_work_directory(app_handle: tauri::AppHandle) -> Option<String> {
     receiver.await.ok().flatten()
 }
 
-fn run_options_from_config(config: AppConfig) -> RunOptions {
+fn run_options_from_config(
+    config: AppConfig,
+    notification_service: &NotificationService,
+) -> RunOptions {
+    let notification_sink = notification_service.run_sink(config.server_chan.clone());
     RunOptions::new(
         config.command,
         PathBuf::from(config.work_dir),
@@ -206,6 +263,7 @@ fn run_options_from_config(config: AppConfig) -> RunOptions {
         config.keep_alive,
         Duration::from_secs(config.keep_alive_interval_minutes * 60),
     )
+    .with_notification_sink(notification_sink)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -269,6 +327,7 @@ async fn run_headless(
     paths: AppPaths,
     startup_dir: PathBuf,
     run_manager: Arc<RunManager>,
+    notification_service: Arc<NotificationService>,
 ) -> HeadlessOutcome {
     let config = match load_config(&paths, &startup_dir).await {
         Ok(config) => config,
@@ -276,16 +335,22 @@ async fn run_headless(
             return record_headless_outcome(&paths, HeadlessOutcome::ConfigFailure(error))
         }
     };
+    let notification_settings = config.server_chan.clone();
     let started = match start_run(
         None,
         run_manager,
         paths.clone(),
-        run_options_from_config(config),
+        run_options_from_config(config, &notification_service),
     )
     .await
     {
         Ok(started) => started,
-        Err(error) => return record_headless_outcome(&paths, HeadlessOutcome::StartFailure(error)),
+        Err(error) => {
+            notification_service
+                .notify_start_failure(notification_settings, &error)
+                .await;
+            return record_headless_outcome(&paths, HeadlessOutcome::StartFailure(error));
+        }
     };
 
     let outcome = match started.wait().await {
@@ -335,9 +400,27 @@ impl UninstallCleanupOutcome {
     }
 }
 
-async fn run_uninstall_cleanup(paths: &AppPaths) -> UninstallCleanupOutcome {
+async fn run_uninstall_cleanup(
+    paths: &AppPaths,
+    credentials: Arc<dyn CredentialStore>,
+) -> UninstallCleanupOutcome {
+    let credential_result = tokio::task::spawn_blocking(move || credentials.delete_send_key())
+        .await
+        .map_err(|_| "卸载时 Credential Manager cleanup task 失败".to_string())
+        .and_then(|result| result);
+    let credential_removed = match credential_result {
+        Ok(removed) => removed,
+        Err(error) => {
+            record_uninstall_warning(paths, &error);
+            false
+        }
+    };
     if !paths.config_file.exists() {
-        return UninstallCleanupOutcome::Skipped;
+        return if credential_removed {
+            UninstallCleanupOutcome::Completed
+        } else {
+            UninstallCleanupOutcome::Skipped
+        };
     }
 
     let config = match read_json::<AppConfig>(&paths.config_file) {
@@ -348,6 +431,19 @@ async fn run_uninstall_cleanup(paths: &AppPaths) -> UninstallCleanupOutcome {
         Ok(task_scheduler::TaskCleanupOutcome::Removed)
         | Ok(task_scheduler::TaskCleanupOutcome::NotFound) => UninstallCleanupOutcome::Completed,
         Err(error) => record_uninstall_failure(paths, error),
+    }
+}
+
+fn record_uninstall_warning(paths: &AppPaths, message: &str) {
+    let entry = format!(
+        "[{}] warning: {}",
+        chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
+        message
+    );
+    if let Err(error) =
+        append_bounded_text_log(&paths.uninstall_log, &entry, DIAGNOSTIC_LOG_MAX_BYTES)
+    {
+        eprintln!("写入 uninstall warning 失败: {}", error);
     }
 }
 
@@ -378,6 +474,7 @@ async fn main() -> ExitCode {
             return ExitCode::from(1);
         }
     };
+    let credential_store: Arc<dyn CredentialStore> = Arc::new(WindowsCredentialStore);
     if let Err(error) = paths.ensure_directories() {
         if is_headless {
             let outcome = record_headless_outcome(&paths, HeadlessOutcome::ConfigFailure(error));
@@ -395,7 +492,9 @@ async fn main() -> ExitCode {
     }));
 
     if launch_mode == LaunchMode::UninstallCleanup {
-        return run_uninstall_cleanup(&paths).await.exit_code();
+        return run_uninstall_cleanup(&paths, credential_store)
+            .await
+            .exit_code();
     }
 
     let exe_dir = env::current_exe()
@@ -421,6 +520,10 @@ async fn main() -> ExitCode {
     }
 
     let run_manager = Arc::new(RunManager::new());
+    let notification_service = Arc::new(NotificationService::production(
+        paths.clone(),
+        credential_store,
+    ));
 
     if let Err(error) = reconcile_stale_status(&paths, None) {
         if is_headless {
@@ -431,7 +534,7 @@ async fn main() -> ExitCode {
     }
 
     if launch_mode == LaunchMode::Headless {
-        return run_headless(paths, startup_dir, run_manager)
+        return run_headless(paths, startup_dir, run_manager, notification_service)
             .await
             .exit_code();
     }
@@ -446,10 +549,15 @@ async fn main() -> ExitCode {
             paths: paths.clone(),
             default_work_dir: startup_dir,
             run_manager,
+            notification_service,
         })
         .invoke_handler(tauri::generate_handler![
             get_config,
             save_app_config,
+            get_server_chan_status,
+            set_server_chan_send_key,
+            delete_server_chan_send_key,
+            test_server_chan_notification,
             start_retry,
             start_manual_keep_alive,
             stop_retry,
@@ -541,6 +649,7 @@ async fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::credential_store::MemoryCredentialStore;
 
     #[test]
     fn headless_outcome_maps_failures_and_stopped_to_nonzero_exit_codes() {
@@ -599,18 +708,36 @@ mod tests {
         let temp = tempfile::tempdir().expect("create temp dir");
         let paths = AppPaths::from_root(temp.path().join("app-data"));
         paths.ensure_directories().expect("create app dirs");
+        let credentials: Arc<dyn CredentialStore> = Arc::new(MemoryCredentialStore::default());
         assert_eq!(
-            run_uninstall_cleanup(&paths).await,
+            run_uninstall_cleanup(&paths, credentials.clone()).await,
             UninstallCleanupOutcome::Skipped
         );
         std::fs::write(&paths.config_file, b"{ corrupt").expect("write corrupt config");
 
         assert!(matches!(
-            run_uninstall_cleanup(&paths).await,
+            run_uninstall_cleanup(&paths, credentials).await,
             UninstallCleanupOutcome::Failed(_)
         ));
         assert!(paths.uninstall_log.exists());
         assert!(!paths.status_file.exists());
         assert!(!paths.run_lock.exists());
+    }
+
+    #[tokio::test]
+    async fn uninstall_credential_failure_is_logged_without_the_secret() {
+        let temp = tempfile::tempdir().expect("create temp dir");
+        let paths = AppPaths::from_root(temp.path().join("app-data"));
+        paths.ensure_directories().expect("create app dirs");
+        let credentials = Arc::new(MemoryCredentialStore::with_send_key("SCT_PRIVATE_TEST_KEY"));
+        credentials.set_failure(true);
+
+        assert_eq!(
+            run_uninstall_cleanup(&paths, credentials).await,
+            UninstallCleanupOutcome::Skipped
+        );
+        let log = std::fs::read_to_string(&paths.uninstall_log).expect("read uninstall log");
+        assert!(log.contains("credential backend failure"));
+        assert!(!log.contains("SCT_PRIVATE_TEST_KEY"));
     }
 }

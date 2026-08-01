@@ -26,6 +26,23 @@ flowchart LR
 - Run-log creation 与“清历史”通过 `maintenance.lock` 串行化，active run log 和 `latest.log` 不会被删除。
 - Backend errors 使用 bounded FIFO queue 逐个展示，不会被成功 poll 隐式清除。
 - NSIS/MSI uninstall 会在删除主 EXE 前调用 `--uninstall-cleanup`，幂等移除已配置的 Scheduled Task。
+- 个人微信通知使用 Server酱 Turbo；普通 retry 流程首次出现成功结果时发送一次，无论成功发生在第几次尝试。
+
+## 个人微信通知（Server酱 Turbo）
+
+在 [Server酱](https://sct.ftqq.com/) 创建 SendKey 后，打开 GUI 的“通知”Tab：
+
+1. 输入 SendKey 并点击“保存凭据”。
+2. 打开“启用通知”。
+3. 点击“发送测试”确认个人微信可以收到消息。
+
+SendKey 只写入当前 Windows 用户的 Credential Manager（service `CodexLauncher`、account `serverchan-sendkey`），不会写入 `launcher-config.json`、`status.json`、运行日志、`status.html` 或前端 autosave。UI 只保留一次性输入，保存成功后立即清空；“删除凭据”可以幂等清理该条目。
+
+Server酱免费额度为每天 5 条。运行通知只有一个固定条件：普通 retry 流程首次出现成功结果。初始执行直接成功或任意后续重试成功都会发送；普通 retry 即使开启“本次保活”，后续 keep-alive cycle 也不会重复发送。最终失败、停止和独立 manual keep-alive 不发送；一次 run 最多发送一条。
+
+通知发送是 bounded best-effort：HTTPS 请求固定到 `sctapi.ftqq.com`，连接 timeout 为 3 秒，完整 delivery 总预算不超过 8 秒；连接失败及明确的 transient HTTP 状态最多重试一次，响应确认超时不会自动重试，并提示“通知可能已送达”，避免重复消耗额度。HTTP/网络/API 失败只写入 `logs\\notifications.log`（上限 1 MiB），不会改变 run 的 terminal status、Headless exit code 或 GUI 主流程。第一版没有 durable outbox，断电或进程被强制终止时不保证补发。
+
+卸载 NSIS/MSI 前会尝试删除 Credential Manager 中的 SendKey 和计划任务。凭据不存在视为成功；实际清理错误写入 `logs\\uninstall.log`，不会记录 SendKey 内容。
 
 ## 数据目录
 
@@ -44,6 +61,7 @@ flowchart LR
     ├── latest.log
     ├── codex-retry-<run-id>.log
     ├── headless.log
+    ├── notifications.log
     ├── uninstall.log
     └── crash.log
 ```
@@ -110,6 +128,11 @@ Unsigned local bundle（开发/测试）：
 Set-Location 'ui'
 npm ci
 npm run bundle:unsigned
+
+# 产物应为 unsigned；检查 Authenticode 状态和 SHA-256
+Get-AuthenticodeSignature '..\\src-tauri\\target\\release\\bundle\\nsis\\Codex-Launcher_2.0.0_x64-setup.exe'
+Get-FileHash '..\\src-tauri\\target\\release\\bundle\\nsis\\Codex-Launcher_2.0.0_x64-setup.exe' -Algorithm SHA256
+Get-FileHash '..\\src-tauri\\target\\release\\bundle\\msi\\Codex-Launcher_2.0.0_x64_en-US.msi' -Algorithm SHA256
 ```
 
 Signed bundle 要求证书已导入 Windows certificate store，并显式提供环境变量：

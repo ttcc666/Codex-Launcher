@@ -43,6 +43,9 @@
       "wix": {
         "fragmentPaths": [
           "./windows/fragments/uninstall-cleanup.wxs"
+        ],
+        "componentGroupRefs": [
+          "UninstallCleanupLinkerAnchor"
         ]
       }
     }

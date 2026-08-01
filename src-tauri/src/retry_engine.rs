@@ -2,6 +2,7 @@ use crate::app_storage::{read_json, AppPaths};
 use crate::config_manager::{
     get_codex_base_url, is_base_url_allowed, MAX_INTERVAL_SECONDS, MAX_TRIES_LIMIT,
 };
+use crate::notifications::{NoopNotificationSink, NotificationEvent, NotificationSink};
 use crate::run_manager::{
     is_stop_requested, keep_alive_override, MaintenanceLease, RunLease, RunManager,
 };
@@ -81,6 +82,8 @@ pub struct TaskStatus {
     pub log_file: String,
     pub latest_log: String,
     pub attempt: u64,
+    #[serde(default)]
+    pub retry_count: u64,
     pub high_demand_count: u64,
     pub max_tries: u64,
     pub interval_seconds: u64,
@@ -98,7 +101,7 @@ pub struct LogEvent {
     pub run_id: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct RunOptions {
     pub command: String,
     pub work_dir: PathBuf,
@@ -108,6 +111,7 @@ pub struct RunOptions {
     pub keep_alive: bool,
     pub keep_alive_interval: Duration,
     pub run_mode: RunMode,
+    notification_sink: Arc<dyn NotificationSink>,
     shell_program: OsString,
 }
 
@@ -128,6 +132,7 @@ impl RunOptions {
             keep_alive: false,
             keep_alive_interval: Duration::from_secs(300),
             run_mode: RunMode::Retry,
+            notification_sink: Arc::new(NoopNotificationSink),
             shell_program: std::env::var_os("ComSpec").unwrap_or_else(|| OsString::from("cmd.exe")),
         }
     }
@@ -140,6 +145,11 @@ impl RunOptions {
 
     pub fn with_run_mode(mut self, run_mode: RunMode) -> Self {
         self.run_mode = run_mode;
+        self
+    }
+
+    pub fn with_notification_sink(mut self, notification_sink: Arc<dyn NotificationSink>) -> Self {
+        self.notification_sink = notification_sink;
         self
     }
 
@@ -217,6 +227,8 @@ struct StatusBuilder {
     max_tries: u64,
     interval_seconds: u64,
     attempt: u64,
+    retry_count: u64,
+    success_notification_attempted: bool,
     high_demand_count: u64,
     last_exit_code: Option<i32>,
     last_error_snippet: String,
@@ -239,6 +251,8 @@ impl StatusBuilder {
             max_tries: options.max_tries,
             interval_seconds: options.interval_seconds,
             attempt: 0,
+            retry_count: 0,
+            success_notification_attempted: false,
             high_demand_count: 0,
             last_exit_code: None,
             last_error_snippet: String::new(),
@@ -268,6 +282,7 @@ impl StatusBuilder {
             log_file: self.log_file.clone(),
             latest_log: self.latest_log.clone(),
             attempt: self.attempt,
+            retry_count: self.retry_count,
             high_demand_count: self.high_demand_count,
             max_tries: self.max_tries,
             interval_seconds: self.interval_seconds,
@@ -391,13 +406,36 @@ async fn run_retry_loop(
     };
     let terminal = status_builder.build(terminal_status, terminal_message.clone());
 
-    let log_result = log_sink.write_system(&terminal_message).await;
-    let flush_result = log_sink.flush().await;
-    let status_result = write_status(&context.paths, &terminal, context.app.as_ref());
-    status_result?;
-    log_result?;
-    flush_result?;
+    log_sink.write_system(&terminal_message).await?;
+    log_sink.flush().await?;
+    write_status(&context.paths, &terminal, context.app.as_ref())?;
+    if terminal_status == RunStatus::Success && context.options.run_mode == RunMode::Retry {
+        notify_retry_success_once(&context, &mut status_builder, &terminal).await;
+    } else {
+        let _ = context
+            .options
+            .notification_sink
+            .notify(NotificationEvent::from_terminal(&terminal))
+            .await;
+    }
     Ok(terminal)
+}
+
+async fn notify_retry_success_once(
+    context: &RunContext,
+    status_builder: &mut StatusBuilder,
+    success_status: &TaskStatus,
+) {
+    if context.options.run_mode != RunMode::Retry || status_builder.success_notification_attempted {
+        return;
+    }
+
+    status_builder.success_notification_attempted = true;
+    let _ = context
+        .options
+        .notification_sink
+        .notify(NotificationEvent::from_terminal(success_status))
+        .await;
 }
 
 async fn execute_attempts(
@@ -494,6 +532,11 @@ async fn execute_attempts(
                 if let Err(error) = write_status(&context.paths, &waiting, context.app.as_ref()) {
                     return LoopOutcome::Failed(error);
                 }
+                let first_success = status_builder.build(
+                    RunStatus::Success,
+                    format!("命令首次成功完成 (exit={exit_code})，保活继续运行"),
+                );
+                notify_retry_success_once(context, status_builder, &first_success).await;
                 match wait_for_keep_alive(context, lease).await {
                     Ok(()) => continue,
                     Err(LoopOutcome::Success(message)) => {
@@ -520,6 +563,7 @@ async fn execute_attempts(
             ));
         }
 
+        status_builder.retry_count += 1;
         let retry_message = if attempt_result.high_demand {
             format!(
                 "检测到高负载，{} 秒后重试",
@@ -1302,8 +1346,11 @@ pub fn get_snippet(text: &str, max_len: usize) -> String {
 mod tests {
     use super::*;
     use crate::app_storage::atomic_write_json;
+    use crate::notifications::{NotificationEvent, NotificationEventType, NotificationSink};
     use crate::run_manager::StopTarget;
     use std::process::{Child, Command as StdCommand, Stdio as StdStdio};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex;
     use std::time::Instant;
 
     const MAINTENANCE_HELPER_ROOT_ENV: &str = "CODEX_LAUNCHER_MAINTENANCE_HELPER_ROOT";
@@ -1319,6 +1366,145 @@ mod tests {
             max_tries,
             String::new(),
         )
+    }
+
+    struct FailingNotificationSink {
+        status_file: PathBuf,
+        observed_status: Arc<Mutex<Option<RunStatus>>>,
+        calls: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl NotificationSink for FailingNotificationSink {
+        async fn notify(&self, event: NotificationEvent) -> Result<(), String> {
+            assert_eq!(event.event_type, NotificationEventType::RunSucceeded);
+            let status: TaskStatus = read_json(&self.status_file).expect("read terminal status");
+            *self.observed_status.lock().expect("observed status mutex") = Some(status.status);
+            self.calls.fetch_add(1, Ordering::AcqRel);
+            Err("intentional notification delivery failure".to_string())
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingNotificationSink {
+        events: Mutex<Vec<NotificationEvent>>,
+    }
+
+    #[async_trait::async_trait]
+    impl NotificationSink for RecordingNotificationSink {
+        async fn notify(&self, event: NotificationEvent) -> Result<(), String> {
+            self.events
+                .lock()
+                .expect("recorded notification events")
+                .push(event);
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn notification_failure_does_not_change_terminal_status_and_sees_persisted_status() {
+        let temp = tempfile::tempdir().expect("create temp dir");
+        let paths = AppPaths::from_root(temp.path().join("app-data"));
+        let observed_status = Arc::new(Mutex::new(None));
+        let sink = Arc::new(FailingNotificationSink {
+            status_file: paths.status_file.clone(),
+            observed_status: observed_status.clone(),
+            calls: AtomicUsize::new(0),
+        });
+
+        let started = start_run(
+            None,
+            Arc::new(RunManager::new()),
+            paths.clone(),
+            options(temp.path(), "exit /b 0", 1).with_notification_sink(sink.clone()),
+        )
+        .await
+        .expect("start successful run");
+        let status = started.wait().await.expect("wait for terminal status");
+
+        assert_eq!(status.status, RunStatus::Success);
+        assert_eq!(
+            read_json::<TaskStatus>(&paths.status_file)
+                .expect("read persisted terminal status")
+                .status,
+            RunStatus::Success
+        );
+        assert_eq!(
+            *observed_status.lock().expect("observed status mutex"),
+            Some(RunStatus::Success)
+        );
+        assert_eq!(sink.calls.load(Ordering::Acquire), 1);
+    }
+
+    #[tokio::test]
+    async fn retry_keep_alive_notifies_only_on_the_first_successful_attempt() {
+        let temp = tempfile::tempdir().expect("create temp dir");
+        let paths = AppPaths::from_root(temp.path().join("app-data"));
+        let manager = Arc::new(RunManager::new());
+        let sink = Arc::new(RecordingNotificationSink::default());
+        let started = start_run(
+            None,
+            manager.clone(),
+            paths.clone(),
+            options(temp.path(), "exit /b 0", 0)
+                .with_keep_alive(true, Duration::from_millis(40))
+                .with_notification_sink(sink.clone()),
+        )
+        .await
+        .expect("start retry keep-alive run");
+        let run_id = started.run_id().to_string();
+        let deadline = Instant::now() + Duration::from_secs(5);
+
+        loop {
+            if let Ok(status) = read_json::<TaskStatus>(&paths.status_file) {
+                if status.attempt >= 3 {
+                    break;
+                }
+            }
+            assert!(
+                Instant::now() < deadline,
+                "run did not complete multiple successful keep-alive attempts"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        manager
+            .set_keep_alive(&paths, &run_id, false)
+            .expect("disable retry keep-alive");
+        let status = tokio::time::timeout(Duration::from_secs(2), started.wait())
+            .await
+            .expect("retry keep-alive should stop promptly")
+            .expect("wait for terminal status");
+
+        assert_eq!(status.status, RunStatus::Success);
+        let events = sink.events.lock().expect("recorded notification events");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event_type, NotificationEventType::RunSucceeded);
+        assert_eq!(events[0].run_mode, Some(RunMode::Retry));
+        assert_eq!(events[0].attempt, 1);
+    }
+
+    #[tokio::test]
+    async fn first_retry_success_records_exactly_one_retry() {
+        let temp = tempfile::tempdir().expect("create temp dir");
+        let paths = AppPaths::from_root(temp.path().join("app-data"));
+        let command = "if exist first-attempt-failed.marker (exit /b 0) else (echo failed>first-attempt-failed.marker & exit /b 1)";
+
+        let status = start_run(
+            None,
+            Arc::new(RunManager::new()),
+            paths,
+            options(temp.path(), command, 2),
+        )
+        .await
+        .expect("start retrying command")
+        .wait()
+        .await
+        .expect("wait for first retry success");
+
+        assert_eq!(status.status, RunStatus::Success, "{}", status.message);
+        assert_eq!(status.attempt, 2);
+        assert_eq!(status.retry_count, 1);
     }
 
     #[tokio::test]
