@@ -12,6 +12,8 @@ const validConfig: AppConfig = {
   taskName: "Codex Daily",
   dailyAt: "08:40",
   allowedBaseUrls: "https://example.com/API",
+  keepAlive: false,
+  keepAliveIntervalMinutes: 5,
 }
 
 describe("config validation", () => {
@@ -20,6 +22,10 @@ describe("config validation", () => {
     expect(validateConfig({ ...validConfig, maxTries: -1 }).maxTries).toBeTruthy()
     expect(
       validateConfig({ ...validConfig, interval: Number.NaN }).interval,
+    ).toBeTruthy()
+    expect(
+      validateConfig({ ...validConfig, keepAliveIntervalMinutes: 0 })
+        .keepAliveIntervalMinutes,
     ).toBeTruthy()
   })
 

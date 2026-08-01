@@ -240,6 +240,7 @@ export default function App() {
     config,
     setConfig,
     state,
+    taskStatus,
     logs,
     beginRun,
     clearVisibleLogs,
@@ -251,6 +252,11 @@ export default function App() {
   } = useTauri()
   const [isStarting, setIsStarting] = useState(false)
   const [isStopping, setIsStopping] = useState(false)
+  const [isUpdatingKeepAlive, setIsUpdatingKeepAlive] = useState(false)
+  const [currentKeepAliveOverride, setCurrentKeepAliveOverride] = useState<boolean>()
+  const [isManualKeepAliveStarting, setIsManualKeepAliveStarting] = useState(false)
+  const [isManualKeepAliveStopping, setIsManualKeepAliveStopping] = useState(false)
+  const [manualKeepAliveRunId, setManualKeepAliveRunId] = useState<string>()
   const [autoScroll, setAutoScroll] = useState(true)
   const [historyDialogOpen, setHistoryDialogOpen] = useState(false)
   const [logFilter, setLogFilter] = useState("")
@@ -259,6 +265,21 @@ export default function App() {
 
   const validationErrors = useMemo(() => validateConfig(config), [config])
   const configIsValid = Object.keys(validationErrors).length === 0
+  const isManualKeepAliveActive =
+    state.isRunning &&
+    (taskStatus?.runMode === "manualKeepAlive" || state.runId === manualKeepAliveRunId)
+  const isRetryRunActive = state.isRunning && taskStatus?.runMode === "retry"
+  const currentRetryKeepAliveEnabled =
+    isRetryRunActive &&
+    (currentKeepAliveOverride ?? taskStatus?.keepAliveEnabled ?? false)
+  const canControlRetryKeepAlive =
+    isRetryRunActive && !isUpdatingKeepAlive && !isStopping
+  const manualKeepAliveDisabled =
+    isManualKeepAliveStarting ||
+    isManualKeepAliveStopping ||
+    isStarting ||
+    isStopping ||
+    (!isManualKeepAliveActive && (state.isRunning || !configIsValid))
 
   const filteredLogs = useMemo(() => {
     let result = logs
@@ -298,8 +319,16 @@ export default function App() {
   }, [dismissError, errors])
 
   useEffect(() => {
-    if (!state.isRunning) setIsStopping(false)
+    if (!state.isRunning) {
+      setIsStopping(false)
+      setIsManualKeepAliveStopping(false)
+      setManualKeepAliveRunId(undefined)
+    }
   }, [state.isRunning])
+
+  useEffect(() => {
+    setCurrentKeepAliveOverride(undefined)
+  }, [state.runId])
 
   useEffect(() => {
     if (!autoScroll || filteredLogs.length === 0) return
@@ -328,6 +357,26 @@ export default function App() {
     key: Key,
     value: AppConfig[Key],
   ) => setConfig((current) => ({ ...current, [key]: value }))
+
+  const setCurrentRetryKeepAlive = async (checked: boolean) => {
+    if (!isRetryRunActive || !state.runId) return
+
+    setIsUpdatingKeepAlive(true)
+    try {
+      const message = await invoke<string>("set_run_keep_alive", {
+        runId: state.runId,
+        enabled: checked,
+      })
+      setCurrentKeepAliveOverride(checked)
+      toast.info(checked ? "本次 run 已开启保活" : "本次 run 已关闭保活", {
+        description: message,
+      })
+    } catch (error: unknown) {
+      showActionError("切换运行时保活失败", error)
+    } finally {
+      setIsUpdatingKeepAlive(false)
+    }
+  }
 
   const browseWorkDir = async () => {
     try {
@@ -367,6 +416,49 @@ export default function App() {
     } catch (error: unknown) {
       setIsStopping(false)
       showActionError("停止失败", error)
+    }
+  }
+
+  const startManualKeepAlive = async () => {
+    if (!configIsValid) {
+      toast.error("配置无效", { description: firstValidationError(validationErrors) })
+      return
+    }
+
+    setIsManualKeepAliveStarting(true)
+    try {
+      const runId = await invoke<string>("start_manual_keep_alive", { config })
+      setManualKeepAliveRunId(runId)
+      beginRun(runId)
+      toast.success("手动保活已启动")
+    } catch (error: unknown) {
+      showActionError("启动手动保活失败", error)
+    } finally {
+      setIsManualKeepAliveStarting(false)
+    }
+  }
+
+  const stopManualKeepAlive = async () => {
+    if (!state.runId) {
+      toast.error("当前没有可停止的手动保活 run")
+      return
+    }
+
+    setIsManualKeepAliveStopping(true)
+    try {
+      const message = await invoke<string>("stop_retry", { runId: state.runId })
+      toast.info("手动保活停止请求已发送", { description: message })
+    } catch (error: unknown) {
+      setIsManualKeepAliveStopping(false)
+      showActionError("停止手动保活失败", error)
+    }
+  }
+
+  const toggleManualKeepAlive = async (checked: boolean) => {
+    if (checked) {
+      await startManualKeepAlive()
+    } else {
+      await stopManualKeepAlive()
     }
   }
 
@@ -468,11 +560,11 @@ export default function App() {
               </h1>
               <p className="mt-1 text-sm text-muted-foreground">Codex 重试引擎控制中心</p>
             </div>
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2 sm:justify-end">
             {!state.isRunning ? (
               <Button
                 onClick={startRetry}
-                disabled={isStarting || !configIsValid}
+                disabled={isStarting || isManualKeepAliveStarting || !configIsValid}
                 className="bg-emerald-600 hover:bg-emerald-500 text-white font-medium shadow-[0_0_15px_rgba(16,185,129,0.35)] hover:shadow-[0_0_22px_rgba(16,185,129,0.55)] active:scale-95 transition-all duration-200"
               >
                 {isStarting ? <Spinner data-icon="inline-start" /> : <PlayIcon data-icon="inline-start" />}
@@ -481,7 +573,7 @@ export default function App() {
             ) : (
               <Button
                 onClick={stopRetry}
-                disabled={isStopping}
+                disabled={isStopping || isManualKeepAliveStopping}
                 variant="destructive"
                 className="shadow-[0_0_15px_rgba(244,63,94,0.35)] hover:shadow-[0_0_22px_rgba(244,63,94,0.55)] active:scale-95 transition-all duration-200"
               >
@@ -489,6 +581,62 @@ export default function App() {
                 {isStopping ? "停止中..." : "停止引擎"}
               </Button>
             )}
+            <div
+              className={cn(
+                "flex h-9 w-[112px] items-center justify-center gap-2 rounded-md border px-2.5",
+                isRetryRunActive
+                  ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"
+                  : "border-border bg-muted/40 text-muted-foreground",
+              )}
+              title={
+                isRetryRunActive
+                  ? "独立控制当前 retry run 的保活，不修改配置页偏好"
+                  : "启动重试引擎后可控制当前 run 的保活"
+              }
+            >
+              <Switch
+                id="currentRetryKeepAlive"
+                checked={currentRetryKeepAliveEnabled}
+                disabled={!canControlRetryKeepAlive}
+                onCheckedChange={(checked) => void setCurrentRetryKeepAlive(checked)}
+                className="scale-75 data-checked:bg-emerald-500"
+              />
+              <label
+                htmlFor="currentRetryKeepAlive"
+                className={cn(
+                  "whitespace-nowrap text-xs font-medium select-none",
+                  canControlRetryKeepAlive ? "cursor-pointer" : "cursor-not-allowed",
+                )}
+              >
+                本次保活
+              </label>
+            </div>
+            <div
+              className={cn(
+                "flex h-9 w-[112px] items-center justify-center gap-2 rounded-md border px-2.5",
+                isManualKeepAliveActive
+                  ? "border-sky-500/40 bg-sky-500/10 text-sky-700 dark:text-sky-300"
+                  : "border-border bg-muted/40 text-muted-foreground",
+              )}
+              title="使用当前配置直接启动或停止独立保活循环"
+            >
+              <Switch
+                id="manualKeepAlive"
+                checked={isManualKeepAliveActive || isManualKeepAliveStarting}
+                disabled={manualKeepAliveDisabled}
+                onCheckedChange={(checked) => void toggleManualKeepAlive(checked)}
+                className="scale-75 data-checked:bg-sky-500"
+              />
+              <label
+                htmlFor="manualKeepAlive"
+                className={cn(
+                  "whitespace-nowrap text-xs font-medium select-none",
+                  manualKeepAliveDisabled ? "cursor-not-allowed" : "cursor-pointer",
+                )}
+              >
+                手动保活
+              </label>
+            </div>
             <Button
               variant="outline"
               size="icon"
@@ -603,6 +751,47 @@ export default function App() {
                     />
                     <FieldError>{validationErrors.allowedBaseUrls}</FieldError>
                   </Field>
+
+                  <Field>
+                    <div className="flex flex-col gap-4 rounded-lg border bg-muted/50 p-4 sm:flex-row sm:items-center sm:justify-between">
+                      <div className="flex flex-col gap-1">
+                        <FieldLabel htmlFor="keepAlive" className="font-medium">
+                          成功后自动保活
+                        </FieldLabel>
+                        <p className="text-xs text-muted-foreground">
+                          仅决定下一次启动重试引擎后的初始状态，不控制当前 run。
+                        </p>
+                      </div>
+                      <div className="flex items-center gap-3">
+                        <div
+                          className={cn(
+                            "flex items-center gap-2 transition-opacity",
+                          )}
+                        >
+                          <Input
+                            id="keepAliveIntervalMinutes"
+                            type="number"
+                            min={1}
+                            max={1_440}
+                            value={config.keepAliveIntervalMinutes}
+                            onChange={(event) =>
+                              handleConfigChange("keepAliveIntervalMinutes", Number(event.currentTarget.value))
+                            }
+                            aria-invalid={Boolean(validationErrors.keepAliveIntervalMinutes)}
+                            className="h-8 w-20"
+                          />
+                          <span className="whitespace-nowrap text-xs text-muted-foreground">分钟 / 次</span>
+                        </div>
+                        <Switch
+                          id="keepAlive"
+                          checked={config.keepAlive}
+                          onCheckedChange={(checked) => handleConfigChange("keepAlive", checked)}
+                          className="border-zinc-400 dark:border-zinc-600"
+                        />
+                      </div>
+                    </div>
+                    <FieldError>{validationErrors.keepAliveIntervalMinutes}</FieldError>
+                  </Field>
                 </FieldGroup>
               </CardContent>
             </Card>
@@ -677,7 +866,7 @@ export default function App() {
                       id="autoscroll"
                       checked={autoScroll}
                       onCheckedChange={setAutoScroll}
-                      className="scale-75 data-[state=checked]:bg-emerald-500"
+                      className="scale-75 data-checked:bg-emerald-500"
                     />
                     <label
                       htmlFor="autoscroll"

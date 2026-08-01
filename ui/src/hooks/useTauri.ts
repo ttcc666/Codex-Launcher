@@ -33,6 +33,8 @@ export interface AppConfig {
   taskName: string
   dailyAt: string
   allowedBaseUrls: string
+  keepAlive: boolean
+  keepAliveIntervalMinutes: number
 }
 
 export type RunStatus =
@@ -42,11 +44,15 @@ export type RunStatus =
   | "failed"
   | "stopped"
 
+export type RunMode = "retry" | "manualKeepAlive"
+
 export interface TaskStatus {
   runId: string
   ownerPid: number
   childPid: number | null
   status: RunStatus
+  runMode: RunMode
+  keepAliveEnabled: boolean
   message: string
   command: string
   workDir: string
@@ -91,6 +97,8 @@ const initialConfig: AppConfig = {
   taskName: "CodexDailyRetry0840",
   dailyAt: "08:40",
   allowedBaseUrls: "",
+  keepAlive: false,
+  keepAliveIntervalMinutes: 5,
 }
 
 export function useTauri() {

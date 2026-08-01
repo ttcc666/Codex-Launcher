@@ -12,6 +12,7 @@ use tokio_util::sync::CancellationToken;
 
 const LOCK_VERSION: u32 = 1;
 const STOP_REQUEST_VERSION: u32 = 1;
+const KEEP_ALIVE_REQUEST_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -30,8 +31,23 @@ pub struct StopRequest {
     pub requested_at: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct KeepAliveRequest {
+    pub version: u32,
+    pub run_id: String,
+    pub enabled: bool,
+    pub requested_at: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StopTarget {
+    Local,
+    Remote,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeepAliveTarget {
     Local,
     Remote,
 }
@@ -47,6 +63,7 @@ pub enum ShutdownWaitResult {
 struct ActiveRun {
     run_id: String,
     cancellation: CancellationToken,
+    keep_alive: watch::Sender<bool>,
     child_pid: Option<u32>,
     completion: watch::Receiver<bool>,
 }
@@ -61,7 +78,12 @@ impl RunManager {
         Self::default()
     }
 
-    pub fn reserve(self: &Arc<Self>, paths: &AppPaths, run_id: String) -> Result<RunLease, String> {
+    pub fn reserve(
+        self: &Arc<Self>,
+        paths: &AppPaths,
+        run_id: String,
+        keep_alive_enabled: bool,
+    ) -> Result<RunLease, String> {
         let process_lock = ProcessLock::try_acquire(
             &paths.run_lock,
             &RunLockMetadata {
@@ -73,6 +95,7 @@ impl RunManager {
         )?;
 
         let cancellation = CancellationToken::new();
+        let (keep_alive, keep_alive_receiver) = watch::channel(keep_alive_enabled);
         let (completion_sender, completion) = watch::channel(false);
         let mut active = self
             .active
@@ -84,6 +107,7 @@ impl RunManager {
         *active = Some(ActiveRun {
             run_id: run_id.clone(),
             cancellation: cancellation.clone(),
+            keep_alive,
             child_pid: None,
             completion,
         });
@@ -94,6 +118,7 @@ impl RunManager {
             paths: paths.clone(),
             run_id,
             cancellation,
+            keep_alive: keep_alive_receiver,
             completion_sender,
             process_lock: Some(process_lock),
         })
@@ -129,6 +154,38 @@ impl RunManager {
             },
         )?;
         Ok(StopTarget::Remote)
+    }
+
+    pub fn set_keep_alive(
+        &self,
+        paths: &AppPaths,
+        run_id: &str,
+        enabled: bool,
+    ) -> Result<KeepAliveTarget, String> {
+        if run_id.trim().is_empty() {
+            return Err("保活控制请求缺少 run ID".to_string());
+        }
+
+        let active = self
+            .active
+            .lock()
+            .map_err(|_| "本地 run reservation mutex 已损坏".to_string())?;
+        if let Some(local) = active.as_ref() {
+            if local.run_id != run_id {
+                return Err(format!(
+                    "run ID 已变化，当前本地 run 为 {}，拒绝控制 {}",
+                    local.run_id, run_id
+                ));
+            }
+
+            write_keep_alive_request(paths, run_id, enabled)?;
+            local.keep_alive.send_replace(enabled);
+            return Ok(KeepAliveTarget::Local);
+        }
+        drop(active);
+
+        write_keep_alive_request(paths, run_id, enabled)?;
+        Ok(KeepAliveTarget::Remote)
     }
 
     pub fn local_owned_run_id(&self) -> Result<Option<String>, String> {
@@ -217,6 +274,7 @@ pub struct RunLease {
     paths: AppPaths,
     run_id: String,
     cancellation: CancellationToken,
+    keep_alive: watch::Receiver<bool>,
     completion_sender: watch::Sender<bool>,
     process_lock: Option<ProcessLock>,
 }
@@ -230,6 +288,14 @@ impl RunLease {
         self.cancellation.clone()
     }
 
+    pub fn keep_alive_receiver(&self) -> watch::Receiver<bool> {
+        self.keep_alive.clone()
+    }
+
+    pub fn is_keep_alive_enabled(&self) -> bool {
+        *self.keep_alive.borrow()
+    }
+
     pub fn set_child_pid(&self, child_pid: Option<u32>) -> Result<(), String> {
         self.manager.set_child_pid(&self.run_id, child_pid)
     }
@@ -238,6 +304,9 @@ impl RunLease {
 impl Drop for RunLease {
     fn drop(&mut self) {
         if let Err(error) = clear_stop_request_if_matches(&self.paths, &self.run_id) {
+            eprintln!("{}", error);
+        }
+        if let Err(error) = clear_keep_alive_request_if_matches(&self.paths, &self.run_id) {
             eprintln!("{}", error);
         }
         self.process_lock.take();
@@ -273,6 +342,54 @@ pub fn clear_stop_request_if_matches(paths: &AppPaths, run_id: &str) -> Result<(
         format!(
             "删除 stop request 失败 [{}]: {}",
             paths.stop_request.display(),
+            error
+        )
+    })
+}
+
+pub fn keep_alive_override(paths: &AppPaths, run_id: &str) -> Result<Option<bool>, String> {
+    if !paths.keep_alive_request.exists() {
+        return Ok(None);
+    }
+    let request: KeepAliveRequest = read_json(&paths.keep_alive_request)?;
+    if request.version != KEEP_ALIVE_REQUEST_VERSION {
+        return Err(format!(
+            "不支持的 keep-alive request 版本 {} [{}]",
+            request.version,
+            paths.keep_alive_request.display()
+        ));
+    }
+    if request.run_id == run_id {
+        Ok(Some(request.enabled))
+    } else {
+        Ok(None)
+    }
+}
+
+fn write_keep_alive_request(paths: &AppPaths, run_id: &str, enabled: bool) -> Result<(), String> {
+    atomic_write_json(
+        &paths.keep_alive_request,
+        &KeepAliveRequest {
+            version: KEEP_ALIVE_REQUEST_VERSION,
+            run_id: run_id.to_string(),
+            enabled,
+            requested_at: Utc::now().to_rfc3339(),
+        },
+    )
+}
+
+pub fn clear_keep_alive_request_if_matches(paths: &AppPaths, run_id: &str) -> Result<(), String> {
+    if !paths.keep_alive_request.exists() {
+        return Ok(());
+    }
+    let request: KeepAliveRequest = read_json(&paths.keep_alive_request)?;
+    if request.run_id != run_id {
+        return Ok(());
+    }
+    fs::remove_file(&paths.keep_alive_request).map_err(|error| {
+        format!(
+            "删除 keep-alive request 失败 [{}]: {}",
+            paths.keep_alive_request.display(),
             error
         )
     })
@@ -426,12 +543,14 @@ mod tests {
         let manager = Arc::new(RunManager::new());
 
         let first = manager
-            .reserve(&paths, "first".to_string())
+            .reserve(&paths, "first".to_string(), false)
             .expect("reserve first run");
-        assert!(manager.reserve(&paths, "second".to_string()).is_err());
+        assert!(manager
+            .reserve(&paths, "second".to_string(), false)
+            .is_err());
         drop(first);
         manager
-            .reserve(&paths, "second".to_string())
+            .reserve(&paths, "second".to_string(), false)
             .expect("reserve after first releases");
     }
 
@@ -444,7 +563,7 @@ mod tests {
 
         let manager = Arc::new(RunManager::new());
         manager
-            .reserve(&paths, "fresh".to_string())
+            .reserve(&paths, "fresh".to_string(), false)
             .expect("stale file must not imply an active OS lock");
     }
 
@@ -454,7 +573,7 @@ mod tests {
         let paths = AppPaths::from_root(temp.path().join("app-data"));
         let manager = Arc::new(RunManager::new());
         let lease = manager
-            .reserve(&paths, "run-a".to_string())
+            .reserve(&paths, "run-a".to_string(), false)
             .expect("reserve run");
         let dropper = tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(20)).await;
@@ -478,7 +597,7 @@ mod tests {
         let paths = AppPaths::from_root(temp.path().join("app-data"));
         let manager = Arc::new(RunManager::new());
         let lease = manager
-            .reserve(&paths, "run-a".to_string())
+            .reserve(&paths, "run-a".to_string(), false)
             .expect("reserve run");
 
         assert_eq!(
@@ -489,6 +608,58 @@ mod tests {
             ShutdownWaitResult::TimedOut("run-a".to_string())
         );
         drop(lease);
+    }
+
+    #[tokio::test]
+    async fn keep_alive_control_is_scoped_to_the_reserved_run() {
+        let temp = tempfile::tempdir().expect("create temp dir");
+        let paths = AppPaths::from_root(temp.path().join("app-data"));
+        let manager = Arc::new(RunManager::new());
+        let lease = manager
+            .reserve(&paths, "run-a".to_string(), true)
+            .expect("reserve run");
+        let mut keep_alive = lease.keep_alive_receiver();
+
+        assert!(manager.set_keep_alive(&paths, "other-run", false).is_err());
+        assert_eq!(
+            manager
+                .set_keep_alive(&paths, "run-a", false)
+                .expect("disable matching run keep-alive"),
+            KeepAliveTarget::Local
+        );
+        keep_alive
+            .changed()
+            .await
+            .expect("receive keep-alive update");
+        assert!(!*keep_alive.borrow_and_update());
+    }
+
+    #[test]
+    fn remote_keep_alive_request_is_run_scoped_and_clearable() {
+        let temp = tempfile::tempdir().expect("create temp dir");
+        let paths = AppPaths::from_root(temp.path().join("app-data"));
+        let manager = RunManager::new();
+
+        assert_eq!(
+            manager
+                .set_keep_alive(&paths, "remote-run", false)
+                .expect("write remote keep-alive request"),
+            KeepAliveTarget::Remote
+        );
+        assert_eq!(
+            keep_alive_override(&paths, "remote-run").expect("read matching request"),
+            Some(false)
+        );
+        assert_eq!(
+            keep_alive_override(&paths, "other-run").expect("ignore mismatched request"),
+            None
+        );
+
+        clear_keep_alive_request_if_matches(&paths, "other-run")
+            .expect("mismatched cleanup is a no-op");
+        assert!(paths.keep_alive_request.exists());
+        clear_keep_alive_request_if_matches(&paths, "remote-run").expect("clear matching request");
+        assert!(!paths.keep_alive_request.exists());
     }
 
     #[test]
@@ -521,7 +692,7 @@ mod tests {
         let paths = AppPaths::from_root(PathBuf::from(root));
         let manager = Arc::new(RunManager::new());
         let _lease = manager
-            .reserve(&paths, "child-process".to_string())
+            .reserve(&paths, "child-process".to_string(), false)
             .expect("child process acquires lock");
         fs::write(&ready, b"ready").expect("signal helper readiness");
         std::thread::sleep(Duration::from_secs(10));
@@ -539,7 +710,7 @@ mod tests {
         let manager = Arc::new(RunManager::new());
         assert_eq!(manager.local_owned_run_id().expect("read local run"), None);
         assert!(manager
-            .reserve(&paths, "parent-process".to_string())
+            .reserve(&paths, "parent-process".to_string(), false)
             .is_err());
         assert!(child.try_wait().expect("query helper").is_none());
 

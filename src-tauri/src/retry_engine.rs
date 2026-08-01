@@ -2,7 +2,9 @@ use crate::app_storage::{read_json, AppPaths};
 use crate::config_manager::{
     get_codex_base_url, is_base_url_allowed, MAX_INTERVAL_SECONDS, MAX_TRIES_LIMIT,
 };
-use crate::run_manager::{is_stop_requested, MaintenanceLease, RunLease, RunManager};
+use crate::run_manager::{
+    is_stop_requested, keep_alive_override, MaintenanceLease, RunLease, RunManager,
+};
 use crate::status_store::write_status;
 use crate::windows_text::decode_output_text;
 use chrono::{DateTime, Local, Utc};
@@ -48,6 +50,14 @@ pub enum RunStatus {
     Stopped,
 }
 
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum RunMode {
+    #[default]
+    Retry,
+    ManualKeepAlive,
+}
+
 impl RunStatus {
     pub fn is_active(self) -> bool {
         matches!(self, Self::Starting | Self::Running)
@@ -61,6 +71,10 @@ pub struct TaskStatus {
     pub owner_pid: u32,
     pub child_pid: Option<u32>,
     pub status: RunStatus,
+    #[serde(default)]
+    pub run_mode: RunMode,
+    #[serde(default)]
+    pub keep_alive_enabled: bool,
     pub message: String,
     pub command: String,
     pub work_dir: String,
@@ -91,6 +105,9 @@ pub struct RunOptions {
     pub interval_seconds: u64,
     pub max_tries: u64,
     pub allowed_base_urls: String,
+    pub keep_alive: bool,
+    pub keep_alive_interval: Duration,
+    pub run_mode: RunMode,
     shell_program: OsString,
 }
 
@@ -108,8 +125,22 @@ impl RunOptions {
             interval_seconds,
             max_tries,
             allowed_base_urls,
+            keep_alive: false,
+            keep_alive_interval: Duration::from_secs(300),
+            run_mode: RunMode::Retry,
             shell_program: std::env::var_os("ComSpec").unwrap_or_else(|| OsString::from("cmd.exe")),
         }
+    }
+
+    pub fn with_keep_alive(mut self, keep_alive: bool, keep_alive_interval: Duration) -> Self {
+        self.keep_alive = keep_alive;
+        self.keep_alive_interval = keep_alive_interval;
+        self
+    }
+
+    pub fn with_run_mode(mut self, run_mode: RunMode) -> Self {
+        self.run_mode = run_mode;
+        self
     }
 
     pub fn validate(&self) -> Result<(), String> {
@@ -130,6 +161,9 @@ impl RunOptions {
         }
         if self.max_tries > MAX_TRIES_LIMIT {
             return Err(format!("最大尝试次数不能超过 {}", MAX_TRIES_LIMIT));
+        }
+        if self.keep_alive && self.keep_alive_interval.is_zero() {
+            return Err("保活间隔必须大于 0".to_string());
         }
         Ok(())
     }
@@ -174,6 +208,8 @@ struct StatusBuilder {
     run_id: String,
     owner_pid: u32,
     child_pid: Option<u32>,
+    run_mode: RunMode,
+    keep_alive_enabled: bool,
     command: String,
     work_dir: String,
     log_file: String,
@@ -194,6 +230,8 @@ impl StatusBuilder {
             run_id,
             owner_pid: std::process::id(),
             child_pid: None,
+            run_mode: options.run_mode,
+            keep_alive_enabled: options.keep_alive,
             command: options.command.clone(),
             work_dir: options.work_dir.to_string_lossy().to_string(),
             log_file: log_file.to_string_lossy().to_string(),
@@ -222,6 +260,8 @@ impl StatusBuilder {
             owner_pid: self.owner_pid,
             child_pid: self.child_pid,
             status,
+            run_mode: self.run_mode,
+            keep_alive_enabled: self.keep_alive_enabled,
             message: message.into(),
             command: self.command.clone(),
             work_dir: self.work_dir.clone(),
@@ -256,7 +296,7 @@ pub async fn start_run(
         Local::now().format("%Y%m%d-%H%M%S"),
         &uuid::Uuid::new_v4().simple().to_string()[..8]
     );
-    let lease = manager.reserve(&paths, run_id.clone())?;
+    let lease = manager.reserve(&paths, run_id.clone(), options.keep_alive)?;
     let maintenance_lease = MaintenanceLease::acquire(&paths.maintenance_lock)?;
     let log_file = paths.logs_dir.join(format!("codex-retry-{run_id}.log"));
     let mut status_builder = StatusBuilder::new(run_id.clone(), &options, &paths, &log_file);
@@ -276,6 +316,9 @@ pub async fn start_run(
     log_sink
         .write_system(&format!("工作目录: {}", options.work_dir.display()))
         .await?;
+    if options.run_mode == RunMode::ManualKeepAlive {
+        log_sink.write_system("运行模式: 手动保活").await?;
+    }
     log_sink.flush().await?;
     let starting = status_builder.build(RunStatus::Starting, "正在启动第一次尝试");
     write_status(&paths, &starting, app.as_ref())?;
@@ -429,6 +472,37 @@ async fn execute_attempts(
 
         let should_retry = exit_code != 0 || attempt_result.high_demand;
         if !should_retry {
+            let keep_alive_enabled = match effective_keep_alive_enabled(context, lease) {
+                Ok(enabled) => enabled,
+                Err(outcome) => return outcome,
+            };
+            status_builder.keep_alive_enabled = keep_alive_enabled;
+            if keep_alive_enabled {
+                status_builder.last_error_snippet = String::new();
+                let keep_alive_seconds = context.options.keep_alive_interval.as_secs();
+                let keep_alive_message = format!(
+                    "命令成功完成 (exit={exit_code})，保活已开启，{} 秒后再次执行",
+                    keep_alive_seconds
+                );
+                if let Err(error) = log_sink.write_system(&keep_alive_message).await {
+                    return LoopOutcome::Failed(error);
+                }
+                if let Err(error) = log_sink.flush().await {
+                    return LoopOutcome::Failed(error);
+                }
+                let waiting = status_builder.build(RunStatus::Running, keep_alive_message);
+                if let Err(error) = write_status(&context.paths, &waiting, context.app.as_ref()) {
+                    return LoopOutcome::Failed(error);
+                }
+                match wait_for_keep_alive(context, lease).await {
+                    Ok(()) => continue,
+                    Err(LoopOutcome::Success(message)) => {
+                        status_builder.keep_alive_enabled = false;
+                        return LoopOutcome::Success(message);
+                    }
+                    Err(outcome) => return outcome,
+                }
+            }
             return LoopOutcome::Success(format!("命令成功完成 (exit={exit_code})"));
         }
 
@@ -604,6 +678,78 @@ async fn wait_for_retry(context: &RunContext, lease: &RunLease) -> Result<(), Lo
                 }
             }
         }
+    }
+}
+
+async fn wait_for_keep_alive(context: &RunContext, lease: &RunLease) -> Result<(), LoopOutcome> {
+    let cancellation = lease.cancellation_token();
+    let mut keep_alive = lease.keep_alive_receiver();
+    if !effective_keep_alive_enabled(context, lease)? {
+        return Err(LoopOutcome::Success(
+            "保活已关闭，当前 run 正常结束".to_string(),
+        ));
+    }
+    let delay = tokio::time::sleep(context.options.keep_alive_interval);
+    tokio::pin!(delay);
+    let mut remote_poll = tokio::time::interval(Duration::from_millis(REMOTE_STOP_POLL_MS));
+    remote_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+    loop {
+        tokio::select! {
+            _ = cancellation.cancelled() => {
+                return Err(LoopOutcome::Stopped("用户在保活等待期间停止了任务".to_string()));
+            }
+            changed = keep_alive.changed() => {
+                match changed {
+                    Ok(()) if !*keep_alive.borrow_and_update() => {
+                        return Err(LoopOutcome::Success(
+                            "保活已关闭，当前 run 正常结束".to_string(),
+                        ));
+                    }
+                    Ok(()) => {}
+                    Err(_) => {
+                        return Err(LoopOutcome::Failed(
+                            "运行时保活控制通道意外关闭".to_string(),
+                        ));
+                    }
+                }
+            }
+            _ = &mut delay => {
+                if effective_keep_alive_enabled(context, lease)? {
+                    return Ok(());
+                }
+                return Err(LoopOutcome::Success(
+                    "保活已关闭，当前 run 正常结束".to_string(),
+                ));
+            },
+            _ = remote_poll.tick() => {
+                match is_stop_requested(&context.paths, lease.run_id()) {
+                    Ok(true) => {
+                        return Err(LoopOutcome::Stopped(
+                            "收到匹配 run ID 的远程停止请求".to_string(),
+                        ));
+                    }
+                    Ok(false) => {}
+                    Err(error) => return Err(LoopOutcome::Failed(error)),
+                }
+                if !effective_keep_alive_enabled(context, lease)? {
+                    return Err(LoopOutcome::Success(
+                        "保活已关闭，当前 run 正常结束".to_string(),
+                    ));
+                }
+            }
+        }
+    }
+}
+
+fn effective_keep_alive_enabled(
+    context: &RunContext,
+    lease: &RunLease,
+) -> Result<bool, LoopOutcome> {
+    match keep_alive_override(&context.paths, lease.run_id()) {
+        Ok(Some(enabled)) => Ok(enabled),
+        Ok(None) => Ok(lease.is_keep_alive_enabled()),
+        Err(error) => Err(LoopOutcome::Failed(error)),
     }
 }
 
@@ -1375,6 +1521,51 @@ mod tests {
         assert_eq!(status.status, RunStatus::Stopped);
     }
 
+    #[tokio::test]
+    async fn disabling_keep_alive_ends_the_current_wait_as_success() {
+        let temp = tempfile::tempdir().expect("create temp dir");
+        let paths = AppPaths::from_root(temp.path().join("app-data"));
+        let manager = Arc::new(RunManager::new());
+        let started = start_run(
+            None,
+            manager.clone(),
+            paths.clone(),
+            options(temp.path(), "echo keep-alive-success", 0)
+                .with_keep_alive(true, Duration::from_secs(60)),
+        )
+        .await
+        .expect("start keep-alive run");
+        let run_id = started.run_id().to_string();
+        let deadline = Instant::now() + Duration::from_secs(5);
+
+        loop {
+            if let Ok(status) = read_json::<TaskStatus>(&paths.status_file) {
+                if status.message.contains("保活已开启") {
+                    assert!(status.keep_alive_enabled);
+                    break;
+                }
+            }
+            assert!(
+                Instant::now() < deadline,
+                "run did not enter keep-alive wait"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        manager
+            .set_keep_alive(&paths, &run_id, false)
+            .expect("disable keep-alive");
+        let status = tokio::time::timeout(Duration::from_secs(2), started.wait())
+            .await
+            .expect("keep-alive wait should end immediately")
+            .expect("wait for terminal status");
+
+        assert_eq!(status.status, RunStatus::Success);
+        assert_eq!(status.attempt, 1);
+        assert!(!status.keep_alive_enabled);
+        assert!(status.message.contains("保活已关闭"));
+    }
+
     #[test]
     fn output_tail_remains_bounded_under_large_output() {
         let mut tail = OutputTail::default();
@@ -1501,7 +1692,7 @@ mod tests {
         paths.ensure_directories().expect("create helper app dirs");
         let manager = Arc::new(RunManager::new());
         let _run_lease = manager
-            .reserve(&paths, "maintenance-race".to_string())
+            .reserve(&paths, "maintenance-race".to_string(), false)
             .expect("helper reserves run lock");
         fs::write(&reserved, b"reserved").expect("signal run reservation");
         wait_for_signal(&go, None);

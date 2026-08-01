@@ -14,8 +14,8 @@ mod windows_text;
 
 use app_storage::{append_bounded_text_log, read_json, AppPaths};
 use config_manager::{load_config, save_config as save_config_file, AppConfig};
-use retry_engine::{clear_history_logs, start_run, RunOptions, RunStatus, TaskStatus};
-use run_manager::{RunManager, ShutdownWaitResult, StopTarget};
+use retry_engine::{clear_history_logs, start_run, RunMode, RunOptions, RunStatus, TaskStatus};
+use run_manager::{KeepAliveTarget, RunManager, ShutdownWaitResult, StopTarget};
 use snapshot::{read_snapshot, SnapshotRequest, SnapshotResponse};
 use status_store::{fail_active_run_if_matches, reconcile_stale_status};
 use std::env;
@@ -54,6 +54,29 @@ async fn start_retry(
 ) -> Result<String, String> {
     save_config_file(&state.paths, &config).await?;
     let options = run_options_from_config(config);
+    start_gui_run(app_handle, &state, options).await
+}
+
+#[tauri::command]
+async fn start_manual_keep_alive(
+    config: AppConfig,
+    app_handle: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    save_config_file(&state.paths, &config).await?;
+    let keep_alive_interval =
+        Duration::from_secs(config.keep_alive_interval_minutes.saturating_mul(60));
+    let options = run_options_from_config(config)
+        .with_keep_alive(true, keep_alive_interval)
+        .with_run_mode(RunMode::ManualKeepAlive);
+    start_gui_run(app_handle, &state, options).await
+}
+
+async fn start_gui_run(
+    app_handle: tauri::AppHandle,
+    state: &AppState,
+    options: RunOptions,
+) -> Result<String, String> {
     let started = start_run(
         Some(app_handle),
         state.run_manager.clone(),
@@ -64,6 +87,26 @@ async fn start_retry(
     let run_id = started.run_id().to_string();
     started.detach();
     Ok(run_id)
+}
+
+#[tauri::command]
+fn set_run_keep_alive(
+    run_id: String,
+    enabled: bool,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    let target = state
+        .run_manager
+        .set_keep_alive(&state.paths, &run_id, enabled)?;
+    let scope = match target {
+        KeepAliveTarget::Local => "本地 run",
+        KeepAliveTarget::Remote => "远程 run",
+    };
+    Ok(if enabled {
+        format!("{scope} 的保活已开启")
+    } else {
+        format!("{scope} 的保活已关闭；若正在保活等待，将立即正常结束")
+    })
 }
 
 #[tauri::command]
@@ -158,6 +201,10 @@ fn run_options_from_config(config: AppConfig) -> RunOptions {
         config.interval,
         config.max_tries,
         config.allowed_base_urls,
+    )
+    .with_keep_alive(
+        config.keep_alive,
+        Duration::from_secs(config.keep_alive_interval_minutes * 60),
     )
 }
 
@@ -404,7 +451,9 @@ async fn main() -> ExitCode {
             get_config,
             save_app_config,
             start_retry,
+            start_manual_keep_alive,
             stop_retry,
+            set_run_keep_alive,
             get_current_status,
             get_app_state,
             install_task,

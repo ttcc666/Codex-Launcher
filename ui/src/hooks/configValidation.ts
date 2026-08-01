@@ -4,6 +4,7 @@ export type ConfigValidationErrors = Partial<Record<keyof AppConfig, string>>
 
 const MAX_INTERVAL_SECONDS = 86_400
 const MAX_TRIES = 100_000
+const MAX_KEEP_ALIVE_MINUTES = 1_440
 const INVALID_TASK_NAME_CHARACTERS = '<>:"/\\|?*&^%$;'
 
 export function validateConfig(config: AppConfig): ConfigValidationErrors {
@@ -24,6 +25,13 @@ export function validateConfig(config: AppConfig): ConfigValidationErrors {
     config.maxTries > MAX_TRIES
   ) {
     errors.maxTries = `最大尝试次数必须是 0–${MAX_TRIES} 的整数`
+  }
+  if (
+    !Number.isInteger(config.keepAliveIntervalMinutes) ||
+    config.keepAliveIntervalMinutes < 1 ||
+    config.keepAliveIntervalMinutes > MAX_KEEP_ALIVE_MINUTES
+  ) {
+    errors.keepAliveIntervalMinutes = `保活间隔必须是 1–${MAX_KEEP_ALIVE_MINUTES} 分钟的整数`
   }
 
   const taskName = config.taskName.trim()

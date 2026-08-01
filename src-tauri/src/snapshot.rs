@@ -1,5 +1,6 @@
 use crate::app_storage::AppPaths;
 use crate::retry_engine::{TaskStatus, MAX_LOGICAL_LINE_BYTES};
+use crate::run_manager::keep_alive_override;
 use crate::status_store::{read_optional_status, reconcile_stale_status};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
@@ -44,7 +45,14 @@ pub async fn read_snapshot(
                 .is_some_and(|status| status.status.is_active()),
         )
         .await?;
-        let status_after = read_optional_status(paths)?;
+        let mut status_after = read_optional_status(paths)?;
+        if let Some(status) = status_after.as_mut() {
+            if status.status.is_active() {
+                if let Some(enabled) = keep_alive_override(paths, &status.run_id)? {
+                    status.keep_alive_enabled = enabled;
+                }
+            }
+        }
         let run_id_after = status_after.as_ref().map(|status| status.run_id.clone());
 
         if retry == 0 && run_id_before != run_id_after {
@@ -213,6 +221,8 @@ mod tests {
             owner_pid: 1,
             child_pid: None,
             status: RunStatus::Running,
+            run_mode: Default::default(),
+            keep_alive_enabled: false,
             message: "running".to_string(),
             command: "echo test".to_string(),
             work_dir: paths.root_dir.to_string_lossy().to_string(),
@@ -351,7 +361,7 @@ mod tests {
         paths.ensure_directories().expect("create app dirs");
         let manager = Arc::new(RunManager::new());
         let _lease = manager
-            .reserve(&paths, "live-run".to_string())
+            .reserve(&paths, "live-run".to_string(), false)
             .expect("hold run lock");
         atomic_write_json(&paths.status_file, &status(&paths, "live-run"))
             .expect("write live status");
@@ -468,7 +478,7 @@ mod tests {
         paths.ensure_directories().expect("create app dirs");
         let manager = Arc::new(RunManager::new());
         let _lease = manager
-            .reserve(&paths, "run-a".to_string())
+            .reserve(&paths, "run-a".to_string(), false)
             .expect("hold run lock");
         atomic_write_json(&paths.status_file, &status(&paths, "run-a")).expect("write status");
         let line = format!("record-{}\n", "x".repeat(1014));

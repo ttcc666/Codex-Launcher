@@ -7,6 +7,7 @@ use url::Url;
 pub const CURRENT_CONFIG_VERSION: u32 = 1;
 pub const MAX_INTERVAL_SECONDS: u64 = 86_400;
 pub const MAX_TRIES_LIMIT: u64 = 100_000;
+pub const MAX_KEEP_ALIVE_INTERVAL_MINUTES: u64 = 24 * 60;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default, rename_all = "camelCase")]
@@ -19,6 +20,8 @@ pub struct AppConfig {
     pub task_name: String,
     pub daily_at: String,
     pub allowed_base_urls: String,
+    pub keep_alive: bool,
+    pub keep_alive_interval_minutes: u64,
 }
 
 impl Default for AppConfig {
@@ -32,6 +35,8 @@ impl Default for AppConfig {
             task_name: "CodexDailyRetry0840".to_string(),
             daily_at: "08:40".to_string(),
             allowed_base_urls: String::new(),
+            keep_alive: false,
+            keep_alive_interval_minutes: 5,
         }
     }
 }
@@ -64,6 +69,12 @@ impl AppConfig {
         }
         if self.max_tries > MAX_TRIES_LIMIT {
             return Err(format!("最大尝试次数不能超过 {}", MAX_TRIES_LIMIT));
+        }
+        if !(1..=MAX_KEEP_ALIVE_INTERVAL_MINUTES).contains(&self.keep_alive_interval_minutes) {
+            return Err(format!(
+                "保活间隔必须在 1..={} 分钟之间",
+                MAX_KEEP_ALIVE_INTERVAL_MINUTES
+            ));
         }
 
         validate_task_name(&self.task_name)?;
@@ -257,6 +268,19 @@ mod tests {
             work_dir: work_dir.to_string_lossy().to_string(),
             ..AppConfig::default()
         }
+    }
+
+    #[test]
+    fn keep_alive_interval_is_validated_for_manual_mode_too() {
+        let temp = tempfile::tempdir().expect("create temp dir");
+        let mut config = valid_config(temp.path());
+        config.keep_alive = false;
+        config.keep_alive_interval_minutes = 0;
+
+        assert!(config
+            .validate()
+            .expect_err("zero keep-alive interval must fail")
+            .contains("保活间隔"));
     }
 
     #[tokio::test]
