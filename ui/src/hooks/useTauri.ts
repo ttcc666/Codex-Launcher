@@ -35,7 +35,12 @@ export interface AppConfig {
   allowedBaseUrls: string
   keepAlive: boolean
   keepAliveIntervalMinutes: number
+  desktopNotification: DesktopNotificationConfig
   serverChan: ServerChanConfig
+}
+
+export interface DesktopNotificationConfig {
+  enabled: boolean
 }
 
 export interface ServerChanConfig {
@@ -109,6 +114,9 @@ const initialConfig: AppConfig = {
   allowedBaseUrls: "",
   keepAlive: false,
   keepAliveIntervalMinutes: 5,
+  desktopNotification: {
+    enabled: true,
+  },
   serverChan: {
     enabled: false,
   },

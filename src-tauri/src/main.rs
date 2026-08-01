@@ -80,6 +80,11 @@ async fn test_server_chan_notification(state: State<'_, AppState>) -> Result<Str
 }
 
 #[tauri::command]
+async fn test_desktop_notification(state: State<'_, AppState>) -> Result<String, String> {
+    state.notification_service.test_desktop_notification().await
+}
+
+#[tauri::command]
 async fn start_retry(
     config: AppConfig,
     app_handle: tauri::AppHandle,
@@ -251,7 +256,10 @@ fn run_options_from_config(
     config: AppConfig,
     notification_service: &NotificationService,
 ) -> RunOptions {
-    let notification_sink = notification_service.run_sink(config.server_chan.clone());
+    let notification_sink = notification_service.run_sink(
+        config.server_chan.clone(),
+        config.desktop_notification.clone(),
+    );
     RunOptions::new(
         config.command,
         PathBuf::from(config.work_dir),
@@ -519,10 +527,13 @@ async fn main() -> ExitCode {
         env::set_var("WEBVIEW2_USER_DATA_FOLDER", &paths.webview_data_dir);
     }
 
+    let tauri_context = tauri::generate_context!();
+    let app_identifier = tauri_context.config().identifier.clone();
     let run_manager = Arc::new(RunManager::new());
     let notification_service = Arc::new(NotificationService::production(
         paths.clone(),
         credential_store,
+        app_identifier,
     ));
 
     if let Err(error) = reconcile_stale_status(&paths, None) {
@@ -558,6 +569,7 @@ async fn main() -> ExitCode {
             set_server_chan_send_key,
             delete_server_chan_send_key,
             test_server_chan_notification,
+            test_desktop_notification,
             start_retry,
             start_manual_keep_alive,
             stop_retry,
@@ -629,7 +641,7 @@ async fn main() -> ExitCode {
                 });
             }
         })
-        .run(tauri::generate_context!());
+        .run(tauri_context);
 
     match result {
         Ok(()) => ExitCode::SUCCESS,

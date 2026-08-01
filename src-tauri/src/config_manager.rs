@@ -17,6 +17,18 @@ pub struct ServerChanConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default, rename_all = "camelCase")]
+pub struct DesktopNotificationConfig {
+    pub enabled: bool,
+}
+
+impl Default for DesktopNotificationConfig {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default, rename_all = "camelCase")]
 pub struct AppConfig {
     pub config_version: u32,
     pub command: String,
@@ -28,6 +40,7 @@ pub struct AppConfig {
     pub allowed_base_urls: String,
     pub keep_alive: bool,
     pub keep_alive_interval_minutes: u64,
+    pub desktop_notification: DesktopNotificationConfig,
     pub server_chan: ServerChanConfig,
 }
 
@@ -44,6 +57,7 @@ impl Default for AppConfig {
             allowed_base_urls: String::new(),
             keep_alive: false,
             keep_alive_interval_minutes: 5,
+            desktop_notification: DesktopNotificationConfig::default(),
             server_chan: ServerChanConfig::default(),
         }
     }
@@ -318,6 +332,11 @@ mod tests {
 
         assert_eq!(loaded.config_version, CURRENT_CONFIG_VERSION);
         assert_eq!(loaded.command, "cmd /c exit 0");
+        assert_eq!(
+            loaded.desktop_notification,
+            DesktopNotificationConfig::default()
+        );
+        assert!(loaded.desktop_notification.enabled);
         assert_eq!(loaded.server_chan, ServerChanConfig::default());
     }
 

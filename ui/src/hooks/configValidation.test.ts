@@ -14,6 +14,9 @@ const validConfig: AppConfig = {
   allowedBaseUrls: "https://example.com/API",
   keepAlive: false,
   keepAliveIntervalMinutes: 5,
+  desktopNotification: {
+    enabled: true,
+  },
   serverChan: {
     enabled: false,
   },

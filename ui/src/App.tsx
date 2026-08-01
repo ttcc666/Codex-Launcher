@@ -22,9 +22,14 @@ import {
 } from "lucide-react"
 import { toast } from "sonner"
 
-
 import { ModeToggle } from "@/components/mode-toggle"
+import { AnimatedContent } from "@/components/ui/AnimatedContent"
+import { BorderGlow } from "@/components/ui/BorderGlow"
+import { ClickSpark } from "@/components/ui/ClickSpark"
+import { CountUp } from "@/components/ui/CountUp"
+import { GradualBlur } from "@/components/ui/GradualBlur"
 import { ShinyText } from "@/components/ui/ShinyText"
+import { SpotlightCard } from "@/components/ui/SpotlightCard"
 import {
   AlertDialog,
   AlertDialogAction,
@@ -276,6 +281,8 @@ export default function App() {
     "loading" | "saving" | "testing" | "deleting"
   >()
   const [serverChanLastResult, setServerChanLastResult] = useState("")
+  const [isTestingDesktopNotification, setIsTestingDesktopNotification] = useState(false)
+  const [desktopNotificationLastResult, setDesktopNotificationLastResult] = useState("")
   const scrollViewportRef = useRef<HTMLDivElement>(null)
 
   const validationErrors = useMemo(() => validateConfig(config), [config])
@@ -396,6 +403,26 @@ export default function App() {
       ...current,
       serverChan: { enabled },
     }))
+
+  const setDesktopNotificationEnabled = (enabled: boolean) =>
+    setConfig((current) => ({
+      ...current,
+      desktopNotification: { enabled },
+    }))
+
+  const testDesktopNotification = async () => {
+    setIsTestingDesktopNotification(true)
+    try {
+      const message = await invoke<string>("test_desktop_notification")
+      setDesktopNotificationLastResult(message)
+      toast.success("桌面测试通知已发送", { description: message })
+    } catch (error: unknown) {
+      setDesktopNotificationLastResult(actionErrorMessage(error))
+      showActionError("发送桌面测试通知失败", error)
+    } finally {
+      setIsTestingDesktopNotification(false)
+    }
+  }
 
   const saveServerChanSendKey = async () => {
     if (!serverChanSendKey.trim()) {
@@ -648,7 +675,10 @@ export default function App() {
         </header>
 
         <main className="container mx-auto flex flex-col gap-8 p-4 md:p-6 lg:p-8">
-          <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+          <AnimatedContent
+            className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between"
+            distance={12}
+          >
             <div>
               <h1 className="text-3xl font-bold tracking-tight">
                 <ShinyText text="Dashboard" speed={5} />
@@ -657,24 +687,34 @@ export default function App() {
             </div>
           <div className="flex flex-wrap items-center gap-2 sm:justify-end">
             {!state.isRunning ? (
-              <Button
-                onClick={startRetry}
+              <ClickSpark
+                color="#34d399"
                 disabled={isStarting || isManualKeepAliveStarting || !configIsValid}
-                className="bg-emerald-600 hover:bg-emerald-500 text-white font-medium shadow-[0_0_15px_rgba(16,185,129,0.35)] hover:shadow-[0_0_22px_rgba(16,185,129,0.55)] active:scale-95 transition-all duration-200"
               >
-                {isStarting ? <Spinner data-icon="inline-start" /> : <PlayIcon data-icon="inline-start" />}
-                {isStarting ? "启动中..." : "启动重试引擎"}
-              </Button>
+                <Button
+                  onClick={startRetry}
+                  disabled={isStarting || isManualKeepAliveStarting || !configIsValid}
+                  className="bg-emerald-600 hover:bg-emerald-500 text-white font-medium shadow-[0_0_15px_rgba(16,185,129,0.35)] hover:shadow-[0_0_22px_rgba(16,185,129,0.55)] active:scale-95 transition-all duration-200"
+                >
+                  {isStarting ? <Spinner data-icon="inline-start" /> : <PlayIcon data-icon="inline-start" />}
+                  {isStarting ? "启动中..." : "启动重试引擎"}
+                </Button>
+              </ClickSpark>
             ) : (
-              <Button
-                onClick={stopRetry}
+              <ClickSpark
+                color="#fb7185"
                 disabled={isStopping || isManualKeepAliveStopping}
-                variant="destructive"
-                className="shadow-[0_0_15px_rgba(244,63,94,0.35)] hover:shadow-[0_0_22px_rgba(244,63,94,0.55)] active:scale-95 transition-all duration-200"
               >
-                {isStopping ? <Spinner data-icon="inline-start" /> : <SquareIcon data-icon="inline-start" />}
-                {isStopping ? "停止中..." : "停止引擎"}
-              </Button>
+                <Button
+                  onClick={stopRetry}
+                  disabled={isStopping || isManualKeepAliveStopping}
+                  variant="destructive"
+                  className="shadow-[0_0_15px_rgba(244,63,94,0.35)] hover:shadow-[0_0_22px_rgba(244,63,94,0.55)] active:scale-95 transition-all duration-200"
+                >
+                  {isStopping ? <Spinner data-icon="inline-start" /> : <SquareIcon data-icon="inline-start" />}
+                  {isStopping ? "停止中..." : "停止引擎"}
+                </Button>
+              </ClickSpark>
             )}
             <div
               className={cn(
@@ -742,24 +782,33 @@ export default function App() {
               <span className="sr-only">打开 Web 仪表盘</span>
             </Button>
           </div>
-        </div>
+        </AnimatedContent>
 
         <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
-          <MetricCard title="系统状态" icon={<ActivityIcon className="size-4 text-zinc-800 dark:text-zinc-200" />}>
-            {statusBadge(state.status)}
-          </MetricCard>
-          <MetricCard title="重试次数" icon={<ZapIcon className="size-4 text-zinc-800 dark:text-zinc-200" />}>
-            {state.attempt}
-          </MetricCard>
-          <MetricCard title="拦截拥堵请求" icon={<ServerCrashIcon className="size-4 text-zinc-800 dark:text-zinc-200" />}>
-            {state.highDemandCount}
-          </MetricCard>
-          <MetricCard title="运行时长" icon={<TimerIcon className="size-4 text-zinc-800 dark:text-zinc-200" />} mono>
-            {state.elapsedText}
-          </MetricCard>
+          <AnimatedContent className="h-full" delay={60}>
+            <MetricCard title="系统状态" icon={<ActivityIcon className="size-4" />} tone="emerald">
+              {statusBadge(state.status)}
+            </MetricCard>
+          </AnimatedContent>
+          <AnimatedContent className="h-full" delay={110}>
+            <MetricCard title="重试次数" icon={<ZapIcon className="size-4" />} tone="sky">
+              <CountUp value={state.attempt} />
+            </MetricCard>
+          </AnimatedContent>
+          <AnimatedContent className="h-full" delay={160}>
+            <MetricCard title="拦截拥堵请求" icon={<ServerCrashIcon className="size-4" />} tone="rose">
+              <CountUp value={state.highDemandCount} />
+            </MetricCard>
+          </AnimatedContent>
+          <AnimatedContent className="h-full" delay={210}>
+            <MetricCard title="运行时长" icon={<TimerIcon className="size-4" />} mono tone="violet">
+              {state.elapsedText}
+            </MetricCard>
+          </AnimatedContent>
         </div>
 
-        <Tabs defaultValue="logs" className="w-full">
+        <AnimatedContent className="w-full" delay={260} distance={12}>
+          <Tabs defaultValue="logs" className="w-full">
           <TabsList className="grid w-full max-w-[520px] grid-cols-4">
             <TabsTrigger value="config">配置参数</TabsTrigger>
             <TabsTrigger value="logs">实时终端</TabsTrigger>
@@ -894,10 +943,78 @@ export default function App() {
           </TabsContent>
 
           <TabsContent value="notifications" className="mt-4">
-            <Card>
+            <div className="flex flex-col gap-4">
+              <Card>
+                <CardHeader>
+                  <CardTitle className="flex items-center gap-2">
+                    <BellIcon className="size-4" />
+                    Windows 桌面通知
+                  </CardTitle>
+                  <CardDescription>
+                    发送到 Windows 通知中心，与 Server酱独立生效，也支持计划任务运行。
+                  </CardDescription>
+                </CardHeader>
+                <CardContent className="flex flex-col gap-5">
+                  <div className="flex flex-col gap-4 rounded-lg border bg-muted/50 p-4 sm:flex-row sm:items-center sm:justify-between">
+                    <div className="flex min-w-0 flex-col gap-1">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <p className="font-medium">本机通知状态</p>
+                        <Badge variant={config.desktopNotification.enabled ? "default" : "outline"}>
+                          {config.desktopNotification.enabled ? "已启用" : "已关闭"}
+                        </Badge>
+                      </div>
+                      <p className="text-xs text-muted-foreground">
+                        普通 retry 流程首次成功时，每次 run 只发送一次。
+                      </p>
+                    </div>
+                    <div className="flex shrink-0 items-center gap-2">
+                      <Switch
+                        id="desktopNotificationEnabled"
+                        checked={config.desktopNotification.enabled}
+                        onCheckedChange={setDesktopNotificationEnabled}
+                      />
+                      <label
+                        htmlFor="desktopNotificationEnabled"
+                        className="cursor-pointer text-sm font-medium"
+                      >
+                        启用通知
+                      </label>
+                    </div>
+                  </div>
+
+                  <div className="rounded-lg border bg-muted/30 p-4">
+                    <p className="text-sm font-medium">触发语义</p>
+                    <p className="mt-1 text-xs leading-5 text-muted-foreground">
+                      Attempt 1 或后续重试首次执行成功都会通知；最终失败、停止、独立 manual
+                      keep-alive 以及“本次保活”的后续 cycle 均不发送。
+                    </p>
+                  </div>
+
+                  <div className="flex flex-col gap-3 border-t pt-4 sm:flex-row sm:items-center sm:justify-between">
+                    <div className="min-h-5 min-w-0 text-xs text-muted-foreground">
+                      {desktopNotificationLastResult || "可发送测试通知确认 Windows 系统设置"}
+                    </div>
+                    <Button
+                      variant="outline"
+                      onClick={() => void testDesktopNotification()}
+                      disabled={isTestingDesktopNotification}
+                      className="shrink-0"
+                    >
+                      {isTestingDesktopNotification ? (
+                        <Spinner data-icon="inline-start" />
+                      ) : (
+                        <SendIcon data-icon="inline-start" />
+                      )}
+                      发送测试
+                    </Button>
+                  </div>
+                </CardContent>
+              </Card>
+
+              <Card>
               <CardHeader>
                 <CardTitle className="flex items-center gap-2">
-                  <BellIcon className="size-4" />
+                  <SendIcon className="size-4" />
                   个人微信通知
                 </CardTitle>
                 <CardDescription>
@@ -1022,11 +1139,13 @@ export default function App() {
                   </div>
                 </div>
               </CardContent>
-            </Card>
+              </Card>
+            </div>
           </TabsContent>
 
           <TabsContent value="logs" className="mt-4">
-            <Card className="flex h-[560px] flex-col overflow-hidden border-zinc-800 bg-zinc-950 shadow-2xl">
+            <BorderGlow status={state.status} className="h-[560px]">
+            <Card className="flex h-full flex-col overflow-hidden border-0 bg-zinc-950 shadow-2xl">
               {/* Terminal Header */}
               <div className="flex flex-wrap items-center justify-between gap-3 border-b border-zinc-800/80 bg-zinc-900/70 px-4 py-2.5 backdrop-blur">
                 {/* Left: Window Dots & Title */}
@@ -1167,7 +1286,8 @@ export default function App() {
               </div>
 
               {/* Log Viewport Panel */}
-              <CardContent className="min-h-0 flex-1 p-0 bg-zinc-950">
+              <CardContent className="relative min-h-0 flex-1 bg-zinc-950 p-0">
+                <GradualBlur position="top" height={18} />
                 <ScrollArea className="h-full w-full terminal-scrollbar" viewportRef={scrollViewportRef}>
                   {filteredLogs.length === 0 ? (
                     <div className="flex h-full min-h-[300px] flex-col items-center justify-center gap-2 p-6 font-mono text-xs text-zinc-500 select-none">
@@ -1200,8 +1320,10 @@ export default function App() {
                     </div>
                   )}
                 </ScrollArea>
+                <GradualBlur position="bottom" height={28} />
               </CardContent>
             </Card>
+            </BorderGlow>
           </TabsContent>
 
           <TabsContent value="task" className="mt-4">
@@ -1265,7 +1387,8 @@ export default function App() {
               </CardContent>
             </Card>
           </TabsContent>
-        </Tabs>
+          </Tabs>
+        </AnimatedContent>
       </main>
       </div>
     </div>
@@ -1277,27 +1400,61 @@ function MetricCard({
   icon,
   children,
   mono = false,
+  tone = "emerald",
 }: {
   title: string
   icon: React.ReactNode
   children: React.ReactNode
   mono?: boolean
+  tone?: MetricTone
 }) {
+  const styles = metricToneStyles[tone]
+
   return (
-    <div className="group relative overflow-hidden rounded-xl border border-zinc-700/80 dark:border-zinc-800 bg-white dark:bg-zinc-950 p-4 sm:p-5 transition-all duration-200 hover:border-zinc-900 dark:hover:border-zinc-700 hover:shadow-md">
-      <div className="flex items-center justify-between">
-        <span className="text-xs font-semibold tracking-wide text-zinc-800 dark:text-zinc-200">{title}</span>
+    <SpotlightCard
+      className="h-full min-h-[138px] p-4 sm:p-5"
+      spotlightColor={styles.spotlight}
+    >
+      <div className={cn("absolute inset-x-6 top-0 h-px bg-gradient-to-r", styles.line)} />
+      <div className="flex items-center justify-between gap-3">
+        <span className="text-xs font-semibold tracking-wide text-zinc-700 dark:text-zinc-200">{title}</span>
+        <span className={cn("rounded-lg border p-2 shadow-sm", styles.icon)}>{icon}</span>
       </div>
-      <div className="mt-2.5 text-zinc-800 dark:text-zinc-200">
-        {icon}
-      </div>
-      <div className="mt-4 flex items-baseline">
-        <div className={cn("text-2xl font-bold tracking-tight text-zinc-900 dark:text-zinc-100", mono && "font-mono")}>
+      <div className="mt-6 flex items-baseline">
+        <div className={cn("text-2xl font-bold tracking-tight text-zinc-900 tabular-nums dark:text-zinc-100", mono && "font-mono")}>
           {children}
         </div>
       </div>
-    </div>
+    </SpotlightCard>
   )
+}
+
+type MetricTone = "emerald" | "sky" | "rose" | "violet"
+
+const metricToneStyles: Record<
+  MetricTone,
+  { icon: string; line: string; spotlight: string }
+> = {
+  emerald: {
+    icon: "border-emerald-500/25 bg-emerald-500/10 text-emerald-600 dark:text-emerald-300",
+    line: "from-transparent via-emerald-400/70 to-transparent",
+    spotlight: "rgba(16, 185, 129, 0.15)",
+  },
+  sky: {
+    icon: "border-sky-500/25 bg-sky-500/10 text-sky-600 dark:text-sky-300",
+    line: "from-transparent via-sky-400/70 to-transparent",
+    spotlight: "rgba(56, 189, 248, 0.14)",
+  },
+  rose: {
+    icon: "border-rose-500/25 bg-rose-500/10 text-rose-600 dark:text-rose-300",
+    line: "from-transparent via-rose-400/70 to-transparent",
+    spotlight: "rgba(251, 113, 133, 0.13)",
+  },
+  violet: {
+    icon: "border-violet-500/25 bg-violet-500/10 text-violet-600 dark:text-violet-300",
+    line: "from-transparent via-violet-400/70 to-transparent",
+    spotlight: "rgba(167, 139, 250, 0.14)",
+  },
 }
 
 function statusBadge(status: "idle" | "starting" | "running" | "success" | "failed" | "stopped") {
