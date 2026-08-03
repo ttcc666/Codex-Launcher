@@ -1,6 +1,7 @@
 use crate::app_storage::{append_bounded_text_log, AppPaths};
-use crate::config_manager::{DesktopNotificationConfig, ServerChanConfig};
+use crate::config_manager::{DesktopNotificationConfig, EmailNotificationConfig, ServerChanConfig};
 use crate::credential_store::CredentialStore;
+use crate::email_notifier::{deliver_email, get_email_password};
 use crate::retry_engine::{RunMode, RunStatus, TaskStatus};
 use crate::server_chan::{validate_send_key, DeliveryReceipt, ServerChanClient};
 use async_trait::async_trait;
@@ -290,6 +291,7 @@ impl NotificationService {
         &self,
         server_chan_settings: ServerChanConfig,
         desktop_settings: DesktopNotificationConfig,
+        email_settings: EmailNotificationConfig,
     ) -> Arc<dyn NotificationSink> {
         Arc::new(NotificationRunSink {
             server_chan: ServerChanRunSink {
@@ -302,6 +304,10 @@ impl NotificationService {
                 settings: desktop_settings,
                 paths: self.paths.clone(),
                 transport: self.desktop.clone(),
+            },
+            email: EmailRunSink {
+                settings: email_settings,
+                paths: self.paths.clone(),
             },
         })
     }
@@ -361,26 +367,68 @@ impl NotificationService {
         result.map(|_| "测试通知已提交至 Windows 通知中心".to_string())
     }
 
-    pub async fn notify_start_failure(&self, settings: ServerChanConfig, message: &str) {
-        let sink = self.run_sink(settings, DesktopNotificationConfig { enabled: false });
+    pub async fn notify_start_failure(
+        &self,
+        settings: ServerChanConfig,
+        message: &str,
+    ) {
+        let sink = self.run_sink(
+            settings,
+            DesktopNotificationConfig { enabled: false },
+            EmailNotificationConfig { enabled: false, ..Default::default() },
+        );
         let _ = sink.notify(NotificationEvent::start_failed(message)).await;
     }
+
+    pub async fn test_email_notification(
+        &self,
+        email_settings: EmailNotificationConfig,
+    ) -> Result<String, String> {
+        if email_settings.smtp_host.trim().is_empty() {
+            return Err("SMTP 服务器地址不能为空".to_string());
+        }
+        if email_settings.to_address.trim().is_empty() {
+            return Err("收件人地址不能为空".to_string());
+        }
+        let password = tokio::task::spawn_blocking(get_email_password)
+            .await
+            .map_err(|_| "读取邮件密码 blocking task 失败".to_string())?
+            .map_err(|e| e)?
+            .ok_or_else(|| "尚未配置 SMTP 密码".to_string())?;
+        let event = NotificationEvent::test("邮件通知配置有效，后续首次成功时会自动发送邮件");
+        let result = deliver_email(
+            &email_settings.smtp_host,
+            email_settings.smtp_port,
+            &email_settings.smtp_username,
+            &password,
+            &email_settings.to_address,
+            event.title(),
+            &event.markdown_description(),
+        )
+        .await;
+        record_email_delivery(&self.paths, &event, &result);
+        result.map(|_| "测试邮件发送成功".to_string())
+    }
+
 }
 
 struct NotificationRunSink {
     server_chan: ServerChanRunSink,
     desktop: DesktopRunSink,
+    email: EmailRunSink,
 }
 
 #[async_trait]
 impl NotificationSink for NotificationRunSink {
     async fn notify(&self, event: NotificationEvent) -> Result<(), String> {
         let server_chan_event = event.clone();
-        let (server_chan_result, desktop_result) = tokio::join!(
+        let email_event = event.clone();
+        let (server_chan_result, desktop_result, email_result) = tokio::join!(
             self.server_chan.notify(server_chan_event),
-            self.desktop.notify(event)
+            self.desktop.notify(event),
+            self.email.notify(email_event),
         );
-        merge_channel_results(server_chan_result, desktop_result)
+        merge_channel_results(server_chan_result, desktop_result, email_result)
     }
 }
 
@@ -438,6 +486,59 @@ impl NotificationSink for DesktopRunSink {
     }
 }
 
+struct EmailRunSink {
+    settings: EmailNotificationConfig,
+    paths: AppPaths,
+}
+
+#[async_trait]
+impl NotificationSink for EmailRunSink {
+    async fn notify(&self, event: NotificationEvent) -> Result<(), String> {
+        if !self.settings.enabled || !should_notify(&event) {
+            return Ok(());
+        }
+        if self.settings.smtp_host.trim().is_empty()
+            || self.settings.smtp_username.trim().is_empty()
+            || self.settings.to_address.trim().is_empty()
+        {
+            let error = "邮件通知已启用，但 SMTP 配置不完整".to_string();
+            record_email_delivery(&self.paths, &event, &Err(error.clone()));
+            return Err(error);
+        }
+
+        let password = match tokio::task::spawn_blocking(get_email_password).await {
+            Ok(Ok(Some(pw))) => pw,
+            Ok(Ok(None)) => {
+                let error = "邮件通知已启用，但尚未配置 SMTP 密码".to_string();
+                record_email_delivery(&self.paths, &event, &Err(error.clone()));
+                return Err(error);
+            }
+            Ok(Err(e)) => {
+                record_email_delivery(&self.paths, &event, &Err(e.clone()));
+                return Err(e);
+            }
+            Err(_) => {
+                let error = "读取邮件密码 blocking task 失败".to_string();
+                record_email_delivery(&self.paths, &event, &Err(error.clone()));
+                return Err(error);
+            }
+        };
+
+        let result = deliver_email(
+            &self.settings.smtp_host,
+            self.settings.smtp_port,
+            &self.settings.smtp_username,
+            &password,
+            &self.settings.to_address,
+            event.title(),
+            &event.markdown_description(),
+        )
+        .await;
+        record_email_delivery(&self.paths, &event, &result);
+        result
+    }
+}
+
 async fn read_send_key(credentials: Arc<dyn CredentialStore>) -> Result<Option<String>, String> {
     tokio::task::spawn_blocking(move || credentials.get_send_key())
         .await
@@ -484,6 +585,18 @@ fn record_desktop_delivery(
     record_delivery(paths, event, "desktop", &outcome);
 }
 
+fn record_email_delivery(
+    paths: &AppPaths,
+    event: &NotificationEvent,
+    result: &Result<(), String>,
+) {
+    let outcome = match result {
+        Ok(()) => "success".to_string(),
+        Err(error) => format!("failed error={}", bound_text(error, 240)),
+    };
+    record_delivery(paths, event, "email", &outcome);
+}
+
 fn record_delivery(paths: &AppPaths, event: &NotificationEvent, channel: &str, outcome: &str) {
     let entry = format!(
         "[{}] channel={} eventId={} type={} {}",
@@ -503,6 +616,7 @@ fn record_delivery(paths: &AppPaths, event: &NotificationEvent, channel: &str, o
 fn merge_channel_results(
     server_chan_result: Result<(), String>,
     desktop_result: Result<(), String>,
+    email_result: Result<(), String>,
 ) -> Result<(), String> {
     let mut errors = Vec::new();
     if let Err(error) = server_chan_result {
@@ -510,6 +624,9 @@ fn merge_channel_results(
     }
     if let Err(error) = desktop_result {
         errors.push(format!("桌面通知: {error}"));
+    }
+    if let Err(error) = email_result {
+        errors.push(format!("邮件: {error}"));
     }
 
     if errors.is_empty() {

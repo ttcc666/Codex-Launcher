@@ -37,6 +37,7 @@ export interface AppConfig {
   keepAliveIntervalMinutes: number
   desktopNotification: DesktopNotificationConfig
   serverChan: ServerChanConfig
+  email: EmailNotificationConfig
 }
 
 export interface DesktopNotificationConfig {
@@ -47,7 +48,19 @@ export interface ServerChanConfig {
   enabled: boolean
 }
 
+export interface EmailNotificationConfig {
+  enabled: boolean
+  smtpHost: string
+  smtpPort: number
+  smtpUsername: string
+  toAddress: string
+}
+
 export interface ServerChanCredentialStatus {
+  configured: boolean
+}
+
+export interface EmailCredentialStatus {
   configured: boolean
 }
 
@@ -119,6 +132,13 @@ const initialConfig: AppConfig = {
   },
   serverChan: {
     enabled: false,
+  },
+  email: {
+    enabled: false,
+    smtpHost: "",
+    smtpPort: 465,
+    smtpUsername: "",
+    toAddress: "",
   },
 }
 

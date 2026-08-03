@@ -6,6 +6,7 @@
 mod app_storage;
 mod config_manager;
 mod credential_store;
+mod email_notifier;
 mod notifications;
 mod retry_engine;
 mod run_manager;
@@ -18,6 +19,7 @@ mod windows_text;
 use app_storage::{append_bounded_text_log, read_json, AppPaths};
 use config_manager::{load_config, save_config as save_config_file, AppConfig};
 use credential_store::{CredentialStore, WindowsCredentialStore};
+use email_notifier::{delete_email_password, get_email_password, set_email_password, EmailCredentialStatus};
 use notifications::{NotificationService, ServerChanCredentialStatus};
 use retry_engine::{clear_history_logs, start_run, RunMode, RunOptions, RunStatus, TaskStatus};
 use run_manager::{KeepAliveTarget, RunManager, ShutdownWaitResult, StopTarget};
@@ -82,6 +84,52 @@ async fn test_server_chan_notification(state: State<'_, AppState>) -> Result<Str
 #[tauri::command]
 async fn test_desktop_notification(state: State<'_, AppState>) -> Result<String, String> {
     state.notification_service.test_desktop_notification().await
+}
+
+// ── 邮件通知命令 ──────────────────────────────────────────────────────────────
+
+#[tauri::command]
+async fn get_email_status() -> Result<EmailCredentialStatus, String> {
+    tokio::task::spawn_blocking(|| {
+        let configured = get_email_password()?.is_some();
+        Ok(EmailCredentialStatus { configured })
+    })
+    .await
+    .map_err(|_| "读取邮件凭据状态 blocking task 失败".to_string())?
+}
+
+#[tauri::command]
+async fn set_email_smtp_password(password: String) -> Result<EmailCredentialStatus, String> {
+    if password.trim().is_empty() {
+        return Err("SMTP 密码不能为空".to_string());
+    }
+    tokio::task::spawn_blocking(move || {
+        set_email_password(&password)?;
+        Ok(EmailCredentialStatus { configured: true })
+    })
+    .await
+    .map_err(|_| "保存邮件凭据 blocking task 失败".to_string())?
+}
+
+#[tauri::command]
+async fn delete_email_smtp_password() -> Result<EmailCredentialStatus, String> {
+    tokio::task::spawn_blocking(|| {
+        delete_email_password()?;
+        Ok(EmailCredentialStatus { configured: false })
+    })
+    .await
+    .map_err(|_| "删除邮件凭据 blocking task 失败".to_string())?
+}
+
+#[tauri::command]
+async fn test_email_notification(
+    config: AppConfig,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    state
+        .notification_service
+        .test_email_notification(config.email)
+        .await
 }
 
 #[tauri::command]
@@ -259,6 +307,7 @@ fn run_options_from_config(
     let notification_sink = notification_service.run_sink(
         config.server_chan.clone(),
         config.desktop_notification.clone(),
+        config.email.clone(),
     );
     RunOptions::new(
         config.command,
@@ -570,6 +619,10 @@ async fn main() -> ExitCode {
             delete_server_chan_send_key,
             test_server_chan_notification,
             test_desktop_notification,
+            get_email_status,
+            set_email_smtp_password,
+            delete_email_smtp_password,
+            test_email_notification,
             start_retry,
             start_manual_keep_alive,
             stop_retry,

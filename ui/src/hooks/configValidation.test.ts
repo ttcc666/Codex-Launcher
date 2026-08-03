@@ -20,6 +20,13 @@ const validConfig: AppConfig = {
   serverChan: {
     enabled: false,
   },
+  email: {
+    enabled: false,
+    smtpHost: "",
+    smtpPort: 465,
+    smtpUsername: "",
+    toAddress: "",
+  },
 }
 
 describe("config validation", () => {

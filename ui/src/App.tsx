@@ -10,6 +10,7 @@ import {
   FileTerminalIcon,
   FolderOpenIcon,
   KeyRoundIcon,
+  MailIcon,
   PlayIcon,
   SearchIcon,
   ServerCrashIcon,
@@ -61,6 +62,7 @@ import { validateConfig } from "@/hooks/configValidation"
 import {
   useTauri,
   type AppConfig,
+  type EmailCredentialStatus,
   type ServerChanCredentialStatus,
 } from "@/hooks/useTauri"
 import { cn } from "@/lib/utils"
@@ -283,6 +285,10 @@ export default function App() {
   const [serverChanLastResult, setServerChanLastResult] = useState("")
   const [isTestingDesktopNotification, setIsTestingDesktopNotification] = useState(false)
   const [desktopNotificationLastResult, setDesktopNotificationLastResult] = useState("")
+  const [emailStatus, setEmailStatus] = useState<EmailCredentialStatus>({ configured: false })
+  const [emailSmtpPassword, setEmailSmtpPassword] = useState("")
+  const [emailAction, setEmailAction] = useState<"loading" | "saving" | "testing" | "deleting">()
+  const [emailLastResult, setEmailLastResult] = useState("")
   const scrollViewportRef = useRef<HTMLDivElement>(null)
 
   const validationErrors = useMemo(() => validateConfig(config), [config])
@@ -364,6 +370,24 @@ export default function App() {
       })
       .finally(() => {
         if (!disposed) setServerChanAction(undefined)
+      })
+    return () => {
+      disposed = true
+    }
+  }, [])
+
+  useEffect(() => {
+    let disposed = false
+    setEmailAction("loading")
+    invoke<EmailCredentialStatus>("get_email_status")
+      .then((status) => {
+        if (!disposed) setEmailStatus(status)
+      })
+      .catch((error: unknown) => {
+        if (!disposed) showActionError("读取邮件凭据状态失败", error)
+      })
+      .finally(() => {
+        if (!disposed) setEmailAction(undefined)
       })
     return () => {
       disposed = true
@@ -477,6 +501,62 @@ export default function App() {
       showActionError("删除 Server酱凭据失败", error)
     } finally {
       setServerChanAction(undefined)
+    }
+  }
+
+  const setEmailEnabled = (enabled: boolean) =>
+    setConfig((current) => ({
+      ...current,
+      email: { ...current.email, enabled },
+    }))
+
+  const saveEmailSmtpPassword = async () => {
+    if (!emailSmtpPassword.trim()) {
+      toast.error("SMTP 密码不能为空")
+      return
+    }
+    setEmailAction("saving")
+    try {
+      const status = await invoke<EmailCredentialStatus>("set_email_smtp_password", {
+        password: emailSmtpPassword,
+      })
+      setEmailStatus(status)
+      setEmailSmtpPassword("")
+      setEmailLastResult("SMTP 密码已保存到 Windows Credential Manager")
+      toast.success("SMTP 密码已安全保存")
+    } catch (error: unknown) {
+      showActionError("保存 SMTP 密码失败", error)
+    } finally {
+      setEmailAction(undefined)
+    }
+  }
+
+  const testEmailNotification = async () => {
+    setEmailAction("testing")
+    try {
+      const message = await invoke<string>("test_email_notification", { config })
+      setEmailLastResult(message)
+      toast.success("测试邮件已发送", { description: message })
+    } catch (error: unknown) {
+      setEmailLastResult("")
+      showActionError("发送测试邮件失败", error)
+    } finally {
+      setEmailAction(undefined)
+    }
+  }
+
+  const deleteEmailSmtpPassword = async () => {
+    setEmailAction("deleting")
+    try {
+      const status = await invoke<EmailCredentialStatus>("delete_email_smtp_password")
+      setEmailStatus(status)
+      setEmailSmtpPassword("")
+      setEmailLastResult("SMTP 密码已删除")
+      toast.success("邮件 SMTP 密码已删除")
+    } catch (error: unknown) {
+      showActionError("删除 SMTP 密码失败", error)
+    } finally {
+      setEmailAction(undefined)
     }
   }
 
@@ -1140,8 +1220,203 @@ export default function App() {
                 </div>
               </CardContent>
               </Card>
-            </div>
-          </TabsContent>
+            {/* 邮件通知卡片 */}
+            <Card>
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2">
+                  <MailIcon className="size-4" />
+                  邮件通知
+                </CardTitle>
+                <CardDescription>
+                  通过 SMTP 发送重试流程首次成功通知到指定邮箱。
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="flex flex-col gap-6">
+                {/* 状态与开关 */}
+                <div className="flex flex-col gap-4 rounded-lg border bg-muted/50 p-4 sm:flex-row sm:items-center sm:justify-between">
+                  <div className="flex min-w-0 flex-col gap-1">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <p className="font-medium">通知状态</p>
+                      <Badge variant={emailStatus.configured ? "default" : "outline"}>
+                        {emailStatus.configured ? "密码已配置" : "密码未配置"}
+                      </Badge>
+                    </div>
+                    <p className="text-xs text-muted-foreground">
+                      SMTP 密码保存在 Windows Credential Manager，不写入应用配置。
+                    </p>
+                  </div>
+                  <div className="flex shrink-0 items-center gap-2">
+                    <Switch
+                      id="emailEnabled"
+                      checked={config.email.enabled}
+                      onCheckedChange={setEmailEnabled}
+                    />
+                    <label htmlFor="emailEnabled" className="cursor-pointer text-sm font-medium">
+                      启用通知
+                    </label>
+                  </div>
+                </div>
+
+                {/* SMTP 配置 */}
+                <div className="flex flex-col gap-4">
+                  <div className="grid gap-4 sm:grid-cols-2">
+                    <Field>
+                      <FieldLabel htmlFor="emailSmtpHost">SMTP 服务器</FieldLabel>
+                      <Input
+                        id="emailSmtpHost"
+                        type="text"
+                        placeholder="smtp.qq.com"
+                        value={config.email.smtpHost}
+                        onChange={(e) => {
+                          const val = e.currentTarget.value
+                          setConfig((c) => ({ ...c, email: { ...c.email, smtpHost: val } }))
+                        }}
+                        disabled={Boolean(emailAction)}
+                      />
+                    </Field>
+                    <Field>
+                      <FieldLabel htmlFor="emailSmtpPort">端口</FieldLabel>
+                      <Input
+                        id="emailSmtpPort"
+                        type="number"
+                        placeholder="465"
+                        value={config.email.smtpPort}
+                        onChange={(e) => {
+                          const val = Number(e.currentTarget.value)
+                          setConfig((c) => ({ ...c, email: { ...c.email, smtpPort: val } }))
+                        }}
+                        disabled={Boolean(emailAction)}
+                      />
+                    </Field>
+                  </div>
+                  <div className="grid gap-4 sm:grid-cols-2">
+                    <Field>
+                      <FieldLabel htmlFor="emailSmtpUsername">发件人邮箱</FieldLabel>
+                      <Input
+                        id="emailSmtpUsername"
+                        type="email"
+                        placeholder="user@qq.com"
+                        value={config.email.smtpUsername}
+                        onChange={(e) => {
+                          const val = e.currentTarget.value
+                          setConfig((c) => ({ ...c, email: { ...c.email, smtpUsername: val } }))
+                        }}
+                        disabled={Boolean(emailAction)}
+                      />
+                    </Field>
+                    <Field>
+                      <FieldLabel htmlFor="emailToAddress">收件人邮箱</FieldLabel>
+                      <Input
+                        id="emailToAddress"
+                        type="email"
+                        placeholder="recipient@example.com"
+                        value={config.email.toAddress}
+                        onChange={(e) => {
+                          const val = e.currentTarget.value
+                          setConfig((c) => ({ ...c, email: { ...c.email, toAddress: val } }))
+                        }}
+                        disabled={Boolean(emailAction)}
+                      />
+                    </Field>
+                  </div>
+                  <Field>
+                    <FieldLabel htmlFor="emailSmtpPassword">SMTP 密码 / 授权码</FieldLabel>
+                    <div className="flex flex-col gap-2 sm:flex-row">
+                      <Input
+                        id="emailSmtpPassword"
+                        type="password"
+                        autoComplete="off"
+                        value={emailSmtpPassword}
+                        onChange={(e) => setEmailSmtpPassword(e.currentTarget.value)}
+                        placeholder={emailStatus.configured ? "输入新密码可覆盖现有凭据" : "SMTP 授权码..."}
+                        disabled={Boolean(emailAction)}
+                      />
+                      <Button
+                        onClick={() => void saveEmailSmtpPassword()}
+                        disabled={Boolean(emailAction) || !emailSmtpPassword.trim()}
+                        className="sm:min-w-[112px]"
+                      >
+                        {emailAction === "saving" ? (
+                          <Spinner data-icon="inline-start" />
+                        ) : (
+                          <KeyRoundIcon data-icon="inline-start" />
+                        )}
+                        保存密码
+                      </Button>
+                    </div>
+                  </Field>
+                </div>
+
+                {/* 触发语义 */}
+                <div className="rounded-lg border bg-muted/30 p-4">
+                  <p className="text-sm font-medium">唯一发送条件</p>
+                  <p className="mt-1 text-xs leading-5 text-muted-foreground">
+                    普通 retry 流程首次出现成功结果时发送一次。最终失败、停止和
+                    manual keep-alive 不发送。
+                  </p>
+                </div>
+
+                {/* 底部操作栏 */}
+                <div className="flex flex-col gap-3 border-t pt-4 sm:flex-row sm:items-center sm:justify-between">
+                  <div className="min-h-5 min-w-0 text-xs text-muted-foreground">
+                    {emailLastResult || "尚未发送测试邮件"}
+                  </div>
+                  <div className="flex shrink-0 flex-wrap gap-2">
+                    <Button
+                      variant="outline"
+                      onClick={() => void testEmailNotification()}
+                      disabled={Boolean(emailAction) || !emailStatus.configured}
+                    >
+                      {emailAction === "testing" ? (
+                        <Spinner data-icon="inline-start" />
+                      ) : (
+                        <SendIcon data-icon="inline-start" />
+                      )}
+                      发送测试
+                    </Button>
+                    <AlertDialog>
+                      <AlertDialogTrigger
+                        render={
+                          <Button
+                            variant="destructive"
+                            disabled={Boolean(emailAction) || !emailStatus.configured}
+                          />
+                        }
+                      >
+                        {emailAction === "deleting" ? (
+                          <Spinner data-icon="inline-start" />
+                        ) : (
+                          <Trash2Icon data-icon="inline-start" />
+                        )}
+                        删除密码
+                      </AlertDialogTrigger>
+                      <AlertDialogContent>
+                        <AlertDialogHeader>
+                          <AlertDialogMedia>
+                            <MailIcon />
+                          </AlertDialogMedia>
+                          <AlertDialogTitle>删除 SMTP 密码？</AlertDialogTitle>
+                          <AlertDialogDescription>
+                            删除后邮件配置仍会保留，但在重新保存密码前无法发送邮件通知。
+                          </AlertDialogDescription>
+                        </AlertDialogHeader>
+                        <AlertDialogFooter>
+                          <AlertDialogCancel>取消</AlertDialogCancel>
+                          <AlertDialogAction
+                            variant="destructive"
+                            onClick={() => void deleteEmailSmtpPassword()}
+                          >
+                            删除密码
+                          </AlertDialogAction>
+                        </AlertDialogFooter>
+                      </AlertDialogContent>
+                    </AlertDialog>
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+          </div>
+        </TabsContent>
 
           <TabsContent value="logs" className="mt-4">
             <BorderGlow status={state.status} className="h-[560px]">

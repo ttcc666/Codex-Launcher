@@ -27,6 +27,22 @@ impl Default for DesktopNotificationConfig {
     }
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default, rename_all = "camelCase")]
+pub struct EmailNotificationConfig {
+    pub enabled: bool,
+    pub smtp_host: String,
+    pub smtp_port: u16,
+    pub smtp_username: String,
+    pub to_address: String,
+}
+
+impl EmailNotificationConfig {
+    pub fn default_port() -> u16 {
+        465
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default, rename_all = "camelCase")]
 pub struct AppConfig {
@@ -42,6 +58,7 @@ pub struct AppConfig {
     pub keep_alive_interval_minutes: u64,
     pub desktop_notification: DesktopNotificationConfig,
     pub server_chan: ServerChanConfig,
+    pub email: EmailNotificationConfig,
 }
 
 impl Default for AppConfig {
@@ -59,6 +76,10 @@ impl Default for AppConfig {
             keep_alive_interval_minutes: 5,
             desktop_notification: DesktopNotificationConfig::default(),
             server_chan: ServerChanConfig::default(),
+            email: EmailNotificationConfig {
+                smtp_port: EmailNotificationConfig::default_port(),
+                ..Default::default()
+            },
         }
     }
 }
