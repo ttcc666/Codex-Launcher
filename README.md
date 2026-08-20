@@ -17,11 +17,13 @@ flowchart LR
 ## 主要行为
 
 - GUI 与 `--headless` 共用 retry engine、配置、状态和 cross-process OS lock。
-- `maxTries` 表示“最大尝试次数（0 为无限）”：`1` 只执行一次，`3` 最多执行三次。
+- `maxTries` 表示“最大尝试次数（0 为无限）”：`1` 只执行一次，`3` 最多执行三次；并发运行时为所有线程累计。
+- `concurrency` 表示“并发线程数（1–16，默认 1）”：大于 1 时多个线程并行执行同一条命令，任一线程成功即判定整个 run 成功并立即终止其余线程；保活循环固定单线程。
 - Fresh install 的 command 为空；用户明确填写有效配置前，Start 保持 disabled，且不会自动保存可执行示例。
 - GUI close 会取消本进程持有的 run，并等待 terminal status、日志 flush 和 lock cleanup；等待有 15 秒上限。
 - 进程崩溃后，下一次启动或 snapshot poll 会用 `run.lock` 判断 owner 是否仍存活，并把 stale active status 恢复为 `failed`。
 - stdout/stderr 按 logical line framing；磁盘日志统一为 UTF-8，并在 Windows 上对无效 UTF-8 使用当前 OEM code page fallback。
+- 并发线程数为 1 时日志格式与单线程版本逐字节一致；大于 1 时每条记录带 `[wN]` 线程标记（`[时间] [w2] [stdout] …`），每个 (线程, 流) 各自维护 line framer，半行不会互相污染。实时终端的关键字过滤可直接用 `[w2]` 只看某个线程。
 - GUI reconnect 到大型 active log 时只读取 bounded tail；完整日志仍保存在磁盘。
 - Run-log creation 与“清历史”通过 `maintenance.lock` 串行化，active run log 和 `latest.log` 不会被删除。
 - Backend errors 使用 bounded FIFO queue 逐个展示，不会被成功 poll 隐式清除。

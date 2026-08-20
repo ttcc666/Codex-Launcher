@@ -19,7 +19,9 @@ mod windows_text;
 use app_storage::{append_bounded_text_log, read_json, AppPaths};
 use config_manager::{load_config, save_config as save_config_file, AppConfig};
 use credential_store::{CredentialStore, WindowsCredentialStore};
-use email_notifier::{delete_email_password, get_email_password, set_email_password, EmailCredentialStatus};
+use email_notifier::{
+    delete_email_password, get_email_password, set_email_password, EmailCredentialStatus,
+};
 use notifications::{NotificationService, ServerChanCredentialStatus};
 use retry_engine::{clear_history_logs, start_run, RunMode, RunOptions, RunStatus, TaskStatus};
 use run_manager::{KeepAliveTarget, RunManager, ShutdownWaitResult, StopTarget};
@@ -316,6 +318,7 @@ fn run_options_from_config(
         config.max_tries,
         config.allowed_base_urls,
     )
+    .with_concurrency(config.concurrency)
     .with_keep_alive(
         config.keep_alive,
         Duration::from_secs(config.keep_alive_interval_minutes * 60),

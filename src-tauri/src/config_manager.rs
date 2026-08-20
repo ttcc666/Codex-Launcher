@@ -8,6 +8,7 @@ pub const CURRENT_CONFIG_VERSION: u32 = 1;
 pub const MAX_INTERVAL_SECONDS: u64 = 86_400;
 pub const MAX_TRIES_LIMIT: u64 = 100_000;
 pub const MAX_KEEP_ALIVE_INTERVAL_MINUTES: u64 = 24 * 60;
+pub const MAX_CONCURRENCY: u64 = 16;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default, rename_all = "camelCase")]
@@ -51,6 +52,7 @@ pub struct AppConfig {
     pub work_dir: String,
     pub interval: u64,
     pub max_tries: u64,
+    pub concurrency: u64,
     pub task_name: String,
     pub daily_at: String,
     pub allowed_base_urls: String,
@@ -69,6 +71,7 @@ impl Default for AppConfig {
             work_dir: String::new(),
             interval: 10,
             max_tries: 0,
+            concurrency: 1,
             task_name: "CodexDailyRetry0840".to_string(),
             daily_at: "08:40".to_string(),
             allowed_base_urls: String::new(),
@@ -112,6 +115,9 @@ impl AppConfig {
         }
         if self.max_tries > MAX_TRIES_LIMIT {
             return Err(format!("最大尝试次数不能超过 {}", MAX_TRIES_LIMIT));
+        }
+        if !(1..=MAX_CONCURRENCY).contains(&self.concurrency) {
+            return Err(format!("并发线程数必须在 1..={} 之间", MAX_CONCURRENCY));
         }
         if !(1..=MAX_KEEP_ALIVE_INTERVAL_MINUTES).contains(&self.keep_alive_interval_minutes) {
             return Err(format!(
@@ -240,6 +246,9 @@ pub async fn load_config(paths: &AppPaths, default_work_dir: &Path) -> Result<Ap
     if config.allowed_base_urls.trim().is_empty() {
         config.allowed_base_urls = get_codex_base_url().await?.unwrap_or_default();
     }
+    if config.concurrency == 0 {
+        config.concurrency = 1;
+    }
 
     if persisted {
         config.validate().map_err(|error| {
@@ -354,11 +363,54 @@ mod tests {
         assert_eq!(loaded.config_version, CURRENT_CONFIG_VERSION);
         assert_eq!(loaded.command, "cmd /c exit 0");
         assert_eq!(
+            loaded.concurrency, 1,
+            "旧配置缺少 concurrency 时必须回落到单线程"
+        );
+        assert_eq!(
             loaded.desktop_notification,
             DesktopNotificationConfig::default()
         );
         assert!(loaded.desktop_notification.enabled);
         assert_eq!(loaded.server_chan, ServerChanConfig::default());
+    }
+
+    #[tokio::test]
+    async fn explicit_zero_concurrency_is_normalized_to_single_thread() {
+        let temp = tempfile::tempdir().expect("create temp dir");
+        let paths = AppPaths::from_root(temp.path().join("app-data"));
+        paths.ensure_directories().expect("create app dirs");
+        let mut config = valid_config(temp.path());
+        config.concurrency = 0;
+        fs::write(
+            &paths.config_file,
+            serde_json::to_vec_pretty(&config).expect("serialize zero-concurrency config"),
+        )
+        .expect("write zero-concurrency config");
+
+        let loaded = load_config(&paths, temp.path())
+            .await
+            .expect("hand-edited zero concurrency must not break loading");
+
+        assert_eq!(loaded.concurrency, 1);
+    }
+
+    #[test]
+    fn concurrency_is_bounded_to_the_supported_range() {
+        let temp = tempfile::tempdir().expect("create temp dir");
+        let mut config = valid_config(temp.path());
+
+        for invalid in [0, MAX_CONCURRENCY + 1] {
+            config.concurrency = invalid;
+            assert!(config
+                .validate()
+                .expect_err("out-of-range concurrency must fail")
+                .contains("并发线程数"));
+        }
+
+        for valid in [1, MAX_CONCURRENCY] {
+            config.concurrency = valid;
+            config.validate().expect("in-range concurrency is accepted");
+        }
     }
 
     #[test]

@@ -4,6 +4,7 @@ export type ConfigValidationErrors = Partial<Record<keyof AppConfig, string>>
 
 const MAX_INTERVAL_SECONDS = 86_400
 const MAX_TRIES = 100_000
+const MAX_CONCURRENCY = 16
 const MAX_KEEP_ALIVE_MINUTES = 1_440
 const INVALID_TASK_NAME_CHARACTERS = '<>:"/\\|?*&^%$;'
 
@@ -25,6 +26,13 @@ export function validateConfig(config: AppConfig): ConfigValidationErrors {
     config.maxTries > MAX_TRIES
   ) {
     errors.maxTries = `最大尝试次数必须是 0–${MAX_TRIES} 的整数`
+  }
+  if (
+    !Number.isInteger(config.concurrency) ||
+    config.concurrency < 1 ||
+    config.concurrency > MAX_CONCURRENCY
+  ) {
+    errors.concurrency = `并发线程数必须是 1–${MAX_CONCURRENCY} 的整数`
   }
   if (
     !Number.isInteger(config.keepAliveIntervalMinutes) ||

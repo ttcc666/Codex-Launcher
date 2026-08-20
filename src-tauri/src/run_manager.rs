@@ -2,6 +2,7 @@ use crate::app_storage::{atomic_write_json, read_json, AppPaths};
 use chrono::Utc;
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -64,7 +65,7 @@ struct ActiveRun {
     run_id: String,
     cancellation: CancellationToken,
     keep_alive: watch::Sender<bool>,
-    child_pid: Option<u32>,
+    child_pids: BTreeMap<usize, u32>,
     completion: watch::Receiver<bool>,
 }
 
@@ -108,7 +109,7 @@ impl RunManager {
             run_id: run_id.clone(),
             cancellation: cancellation.clone(),
             keep_alive,
-            child_pid: None,
+            child_pids: BTreeMap::new(),
             completion,
         });
         drop(active);
@@ -240,7 +241,12 @@ impl RunManager {
         }
     }
 
-    fn set_child_pid(&self, run_id: &str, child_pid: Option<u32>) -> Result<(), String> {
+    fn set_worker_child_pid(
+        &self,
+        run_id: &str,
+        worker_id: usize,
+        child_pid: Option<u32>,
+    ) -> Result<(), String> {
         let mut active = self
             .active
             .lock()
@@ -254,7 +260,10 @@ impl RunManager {
                 local.run_id, run_id
             ));
         }
-        local.child_pid = child_pid;
+        match child_pid {
+            Some(child_pid) => local.child_pids.insert(worker_id, child_pid),
+            None => local.child_pids.remove(&worker_id),
+        };
         Ok(())
     }
 
@@ -296,8 +305,13 @@ impl RunLease {
         *self.keep_alive.borrow()
     }
 
-    pub fn set_child_pid(&self, child_pid: Option<u32>) -> Result<(), String> {
-        self.manager.set_child_pid(&self.run_id, child_pid)
+    pub fn set_worker_child_pid(
+        &self,
+        worker_id: usize,
+        child_pid: Option<u32>,
+    ) -> Result<(), String> {
+        self.manager
+            .set_worker_child_pid(&self.run_id, worker_id, child_pid)
     }
 }
 

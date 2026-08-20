@@ -79,8 +79,7 @@ pub async fn deliver_email(
         .body(body.to_string())
         .map_err(|e| format!("构建邮件失败: {e}"))?;
 
-    let credentials =
-        Credentials::new(smtp_username.to_string(), smtp_password.to_string());
+    let credentials = Credentials::new(smtp_username.to_string(), smtp_password.to_string());
 
     let tls_params = TlsParameters::new(smtp_host.to_string())
         .map_err(|e| format!("TLS 参数初始化失败: {e}"))?;

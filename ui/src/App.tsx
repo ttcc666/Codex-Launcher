@@ -867,7 +867,14 @@ export default function App() {
         <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
           <AnimatedContent className="h-full" delay={60}>
             <MetricCard title="系统状态" icon={<ActivityIcon className="size-4" />} tone="emerald">
-              {statusBadge(state.status)}
+              <div className="flex flex-col gap-1.5">
+                {statusBadge(state.status)}
+                {state.concurrency > 1 && (
+                  <span className="text-xs font-medium text-muted-foreground">
+                    并发 {state.activeWorkers}/{state.concurrency} 线程
+                  </span>
+                )}
+              </div>
             </MetricCard>
           </AnimatedContent>
           <AnimatedContent className="h-full" delay={110}>
@@ -936,7 +943,7 @@ export default function App() {
                     <FieldError>{validationErrors.workDir}</FieldError>
                   </Field>
 
-                  <div className="grid gap-4 sm:grid-cols-2">
+                  <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
                     <Field data-invalid={Boolean(validationErrors.interval)}>
                       <FieldLabel htmlFor="interval">重试间隔（秒）</FieldLabel>
                       <Input
@@ -963,7 +970,24 @@ export default function App() {
                       />
                       <FieldError>{validationErrors.maxTries}</FieldError>
                     </Field>
+                    <Field data-invalid={Boolean(validationErrors.concurrency)}>
+                      <FieldLabel htmlFor="concurrency">并发线程数</FieldLabel>
+                      <Input
+                        id="concurrency"
+                        type="number"
+                        min={1}
+                        max={16}
+                        value={config.concurrency}
+                        onChange={(event) => handleConfigChange("concurrency", Number(event.currentTarget.value))}
+                        aria-invalid={Boolean(validationErrors.concurrency)}
+                      />
+                      <FieldError>{validationErrors.concurrency}</FieldError>
+                    </Field>
                   </div>
+                  <p className="-mt-2 text-xs text-muted-foreground">
+                    并发线程数 &gt; 1 时，多个线程并行执行同一条命令，任一线程成功即终止其余线程；
+                    最大尝试次数为所有线程累计。保活循环固定单线程。
+                  </p>
 
                   <Field data-invalid={Boolean(validationErrors.allowedBaseUrls)}>
                     <FieldLabel htmlFor="allowedUrls">URL 拦截白名单</FieldLabel>

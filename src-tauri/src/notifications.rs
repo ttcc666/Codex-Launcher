@@ -367,15 +367,14 @@ impl NotificationService {
         result.map(|_| "测试通知已提交至 Windows 通知中心".to_string())
     }
 
-    pub async fn notify_start_failure(
-        &self,
-        settings: ServerChanConfig,
-        message: &str,
-    ) {
+    pub async fn notify_start_failure(&self, settings: ServerChanConfig, message: &str) {
         let sink = self.run_sink(
             settings,
             DesktopNotificationConfig { enabled: false },
-            EmailNotificationConfig { enabled: false, ..Default::default() },
+            EmailNotificationConfig {
+                enabled: false,
+                ..Default::default()
+            },
         );
         let _ = sink.notify(NotificationEvent::start_failed(message)).await;
     }
@@ -392,8 +391,7 @@ impl NotificationService {
         }
         let password = tokio::task::spawn_blocking(get_email_password)
             .await
-            .map_err(|_| "读取邮件密码 blocking task 失败".to_string())?
-            .map_err(|e| e)?
+            .map_err(|_| "读取邮件密码 blocking task 失败".to_string())??
             .ok_or_else(|| "尚未配置 SMTP 密码".to_string())?;
         let event = NotificationEvent::test("邮件通知配置有效，后续首次成功时会自动发送邮件");
         let result = deliver_email(
@@ -409,7 +407,6 @@ impl NotificationService {
         record_email_delivery(&self.paths, &event, &result);
         result.map(|_| "测试邮件发送成功".to_string())
     }
-
 }
 
 struct NotificationRunSink {
@@ -585,11 +582,7 @@ fn record_desktop_delivery(
     record_delivery(paths, event, "desktop", &outcome);
 }
 
-fn record_email_delivery(
-    paths: &AppPaths,
-    event: &NotificationEvent,
-    result: &Result<(), String>,
-) {
+fn record_email_delivery(paths: &AppPaths, event: &NotificationEvent, result: &Result<(), String>) {
     let outcome = match result {
         Ok(()) => "success".to_string(),
         Err(error) => format!("failed error={}", bound_text(error, 240)),
@@ -767,9 +760,12 @@ mod tests {
             run_id: "run-123".to_string(),
             owner_pid: 1,
             child_pid: None,
+            child_pids: Vec::new(),
             status,
             run_mode: RunMode::Retry,
             keep_alive_enabled: false,
+            concurrency: 1,
+            active_workers: 0,
             message: "terminal message".to_string(),
             command: "secret command".to_string(),
             work_dir: root.to_string_lossy().to_string(),
@@ -829,7 +825,11 @@ mod tests {
         let client = Arc::new(ServerChanClient::with_transport(transport.clone()));
         let service = NotificationService::with_client(paths, credentials, client);
         let settings = ServerChanConfig { enabled: true };
-        let sink = service.run_sink(settings, DesktopNotificationConfig { enabled: false });
+        let sink = service.run_sink(
+            settings,
+            DesktopNotificationConfig { enabled: false },
+            EmailNotificationConfig::default(),
+        );
 
         for attempt in [1, 2, 3] {
             let mut success = retry_success_status(temp.path(), attempt);
@@ -879,7 +879,11 @@ mod tests {
 
         let event = NotificationEvent::from_terminal(&retry_success_status(temp.path(), 1));
         assert!(service
-            .run_sink(settings, DesktopNotificationConfig { enabled: false },)
+            .run_sink(
+                settings,
+                DesktopNotificationConfig { enabled: false },
+                EmailNotificationConfig::default(),
+            )
             .notify(event)
             .await
             .is_err());
@@ -909,6 +913,7 @@ mod tests {
         let sink = service.run_sink(
             ServerChanConfig { enabled: false },
             DesktopNotificationConfig { enabled: true },
+            EmailNotificationConfig::default(),
         );
 
         for attempt in [1, 2, 3] {
@@ -968,6 +973,7 @@ mod tests {
             .run_sink(
                 ServerChanConfig { enabled: true },
                 DesktopNotificationConfig { enabled: true },
+                EmailNotificationConfig::default(),
             )
             .notify(event)
             .await;

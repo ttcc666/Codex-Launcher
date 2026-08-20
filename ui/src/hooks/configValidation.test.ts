@@ -9,6 +9,7 @@ const validConfig: AppConfig = {
   workDir: "C:\\",
   interval: 10,
   maxTries: 0,
+  concurrency: 1,
   taskName: "Codex Daily",
   dailyAt: "08:40",
   allowedBaseUrls: "https://example.com/API",
@@ -40,6 +41,19 @@ describe("config validation", () => {
       validateConfig({ ...validConfig, keepAliveIntervalMinutes: 0 })
         .keepAliveIntervalMinutes,
     ).toBeTruthy()
+  })
+
+  it("bounds the concurrency worker count to the backend range", () => {
+    for (const concurrency of [0, -1, 17, 1.5, Number.NaN]) {
+      expect(
+        validateConfig({ ...validConfig, concurrency }).concurrency,
+      ).toBeTruthy()
+    }
+    for (const concurrency of [1, 8, 16]) {
+      expect(
+        validateConfig({ ...validConfig, concurrency }).concurrency,
+      ).toBeUndefined()
+    }
   })
 
   it("rejects invalid scheduler time and shell metacharacters", () => {

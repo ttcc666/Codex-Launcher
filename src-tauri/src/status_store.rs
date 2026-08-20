@@ -67,6 +67,8 @@ pub fn reconcile_stale_status(
     let message = "run owner 已退出，未能持久化 terminal status；已在恢复检查中标记为失败";
     current.status = RunStatus::Failed;
     current.child_pid = None;
+    current.child_pids.clear();
+    current.active_workers = 0;
     current.message = message.to_string();
     current.last_error_snippet = get_snippet(message, 280);
     current.progress_percent = 100.0;
@@ -90,6 +92,8 @@ pub fn fail_active_run_if_matches(
 
     status.status = RunStatus::Failed;
     status.child_pid = None;
+    status.child_pids.clear();
+    status.active_workers = 0;
     status.message = message.to_string();
     status.last_error_snippet = get_snippet(message, 280);
     status.progress_percent = 100.0;
@@ -127,6 +131,7 @@ fn render_status_html(status: &TaskStatus) -> String {
     <p>Run ID: {run_id}</p>
     <div class="metric">尝试次数: {attempt}</div>
     <div class="metric">高负载次数: {high_demand_count}</div>
+    <div class="metric">并发线程数: {concurrency}（活跃 {active_workers}）</div>
     <p><strong>状态:</strong> {message}</p>
     <p><strong>命令:</strong> <code>{command}</code></p>
     <pre>{preview}</pre>
@@ -136,6 +141,8 @@ fn render_status_html(status: &TaskStatus) -> String {
         run_id = html_escape(&status.run_id),
         attempt = status.attempt,
         high_demand_count = status.high_demand_count,
+        concurrency = status.concurrency,
+        active_workers = status.active_workers,
         message = html_escape(&status.message),
         command = html_escape(&status.command),
         preview = html_escape(if status.result_preview.is_empty() {

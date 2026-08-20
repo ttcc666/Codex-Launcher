@@ -30,6 +30,7 @@ export interface AppConfig {
   workDir: string
   interval: number
   maxTries: number
+  concurrency: number
   taskName: string
   dailyAt: string
   allowedBaseUrls: string
@@ -77,9 +78,12 @@ export interface TaskStatus {
   runId: string
   ownerPid: number
   childPid: number | null
+  childPids: number[]
   status: RunStatus
   runMode: RunMode
   keepAliveEnabled: boolean
+  concurrency: number
+  activeWorkers: number
   message: string
   command: string
   workDir: string
@@ -104,6 +108,8 @@ export interface AppViewState {
   isRunning: boolean
   attempt: number
   highDemandCount: number
+  concurrency: number
+  activeWorkers: number
   elapsedText: string
   message: string
 }
@@ -122,6 +128,7 @@ const initialConfig: AppConfig = {
   workDir: "",
   interval: 10,
   maxTries: 0,
+  concurrency: 1,
   taskName: "CodexDailyRetry0840",
   dailyAt: "08:40",
   allowedBaseUrls: "",
@@ -405,6 +412,8 @@ export function useTauri() {
       isRunning: status === "starting" || status === "running",
       attempt: taskStatus?.attempt ?? 0,
       highDemandCount: taskStatus?.highDemandCount ?? 0,
+      concurrency: taskStatus?.concurrency ?? 1,
+      activeWorkers: taskStatus?.activeWorkers ?? 0,
       elapsedText: formatElapsed(taskStatus, clock),
       message: taskStatus?.message ?? "",
     }
