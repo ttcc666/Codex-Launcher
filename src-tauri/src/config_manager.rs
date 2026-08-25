@@ -1,10 +1,13 @@
-use crate::app_storage::{atomic_write_json, read_json, AppPaths};
+use crate::app_storage::{atomic_write_bytes, atomic_write_json, AppPaths};
+use crate::schedule::ScheduleConfig;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::collections::HashMap;
+use std::fs;
 use std::path::{Path, PathBuf};
 use url::Url;
 
-pub const CURRENT_CONFIG_VERSION: u32 = 1;
+pub const CURRENT_CONFIG_VERSION: u32 = 2;
 pub const MAX_INTERVAL_SECONDS: u64 = 86_400;
 pub const MAX_TRIES_LIMIT: u64 = 100_000;
 pub const MAX_KEEP_ALIVE_INTERVAL_MINUTES: u64 = 24 * 60;
@@ -54,7 +57,7 @@ pub struct AppConfig {
     pub max_tries: u64,
     pub concurrency: u64,
     pub task_name: String,
-    pub daily_at: String,
+    pub schedule: ScheduleConfig,
     pub allowed_base_urls: String,
     pub keep_alive: bool,
     pub keep_alive_interval_minutes: u64,
@@ -73,7 +76,7 @@ impl Default for AppConfig {
             max_tries: 0,
             concurrency: 1,
             task_name: "CodexDailyRetry0840".to_string(),
-            daily_at: "08:40".to_string(),
+            schedule: ScheduleConfig::default(),
             allowed_base_urls: String::new(),
             keep_alive: false,
             keep_alive_interval_minutes: 5,
@@ -89,7 +92,7 @@ impl Default for AppConfig {
 
 impl AppConfig {
     pub fn validate(&self) -> Result<(), String> {
-        if self.config_version == 0 || self.config_version > CURRENT_CONFIG_VERSION {
+        if self.config_version != CURRENT_CONFIG_VERSION {
             return Err(format!(
                 "不支持的配置版本 {}，当前支持版本为 {}",
                 self.config_version, CURRENT_CONFIG_VERSION
@@ -127,7 +130,7 @@ impl AppConfig {
         }
 
         validate_task_name(&self.task_name)?;
-        validate_daily_at(&self.daily_at)?;
+        self.schedule.validate()?;
 
         for candidate in split_allowed_urls(&self.allowed_base_urls) {
             parse_base_url(candidate)?;
@@ -155,16 +158,6 @@ pub fn validate_task_name(task_name: &str) -> Result<(), String> {
         return Err("计划任务名称包含不允许的字符".to_string());
     }
     Ok(())
-}
-
-pub fn validate_daily_at(daily_at: &str) -> Result<(), String> {
-    let value = daily_at.trim();
-    if value.len() != 5 || value.as_bytes().get(2) != Some(&b':') {
-        return Err("计划时间必须使用严格 HH:mm 格式".to_string());
-    }
-    chrono::NaiveTime::parse_from_str(value, "%H:%M")
-        .map(|_| ())
-        .map_err(|_| "计划时间必须是 00:00 到 23:59 的有效时间".to_string())
 }
 
 pub fn get_codex_config_path() -> PathBuf {
@@ -235,7 +228,7 @@ pub async fn load_config(paths: &AppPaths, default_work_dir: &Path) -> Result<Ap
     paths.ensure_directories()?;
     let persisted = paths.config_file.exists();
     let mut config = if persisted {
-        read_json::<AppConfig>(&paths.config_file)?
+        load_persisted_config(&paths.config_file)?
     } else {
         AppConfig::default()
     };
@@ -261,10 +254,92 @@ pub async fn load_config(paths: &AppPaths, default_work_dir: &Path) -> Result<Ap
 pub async fn save_config(paths: &AppPaths, config: &AppConfig) -> Result<(), String> {
     config.validate()?;
     let path = paths.config_file.clone();
+    let backup = paths.config_v1_backup.clone();
     let config = config.clone();
-    tokio::task::spawn_blocking(move || atomic_write_json(&path, &config))
-        .await
-        .map_err(|error| format!("配置写入任务失败: {}", error))?
+    tokio::task::spawn_blocking(move || {
+        backup_v1_config_if_needed(&path, &backup)?;
+        atomic_write_json(&path, &config)
+    })
+    .await
+    .map_err(|error| format!("配置写入任务失败: {}", error))?
+}
+
+fn load_persisted_config(path: &Path) -> Result<AppConfig, String> {
+    let content = fs::read_to_string(path)
+        .map_err(|error| format!("读取 JSON 失败 [{}]: {}", path.display(), error))?;
+    let mut value: Value = serde_json::from_str(&content)
+        .map_err(|error| format!("解析 JSON 失败 [{}]: {}", path.display(), error))?;
+    let version = config_version(&value)?;
+    if version > CURRENT_CONFIG_VERSION {
+        return Err(format!(
+            "配置校验失败 [{}]: 不支持的配置版本 {}，当前支持版本为 {}",
+            path.display(),
+            version,
+            CURRENT_CONFIG_VERSION
+        ));
+    }
+    if version == 1 {
+        migrate_v1_value(&mut value)?;
+    }
+    serde_json::from_value(value)
+        .map_err(|error| format!("解析 JSON 失败 [{}]: {}", path.display(), error))
+}
+
+fn config_version(value: &Value) -> Result<u32, String> {
+    let version = value
+        .get("configVersion")
+        .map(|version| {
+            version
+                .as_u64()
+                .and_then(|version| u32::try_from(version).ok())
+                .ok_or_else(|| "configVersion 必须是非负整数".to_string())
+        })
+        .transpose()?
+        .unwrap_or(1);
+    if version == 0 {
+        return Err("configVersion 不能为 0".to_string());
+    }
+    Ok(version)
+}
+
+fn migrate_v1_value(value: &mut Value) -> Result<(), String> {
+    let object = value
+        .as_object_mut()
+        .ok_or_else(|| "配置根节点必须是 JSON object".to_string())?;
+    let daily_at = object
+        .get("dailyAt")
+        .and_then(Value::as_str)
+        .unwrap_or("08:40")
+        .trim()
+        .to_string();
+    object.insert(
+        "schedule".to_string(),
+        serde_json::json!({
+            "kind": "daily",
+            "time": daily_at,
+            "everyDays": 1
+        }),
+    );
+    object.insert(
+        "configVersion".to_string(),
+        Value::from(CURRENT_CONFIG_VERSION),
+    );
+    object.remove("dailyAt");
+    Ok(())
+}
+
+fn backup_v1_config_if_needed(path: &Path, backup: &Path) -> Result<(), String> {
+    if backup.exists() || !path.exists() {
+        return Ok(());
+    }
+    let bytes = fs::read(path)
+        .map_err(|error| format!("读取旧配置失败 [{}]: {}", path.display(), error))?;
+    let value: Value = serde_json::from_slice(&bytes)
+        .map_err(|error| format!("解析旧配置失败 [{}]: {}", path.display(), error))?;
+    if config_version(&value)? == 1 {
+        atomic_write_bytes(backup, &bytes)?;
+    }
+    Ok(())
 }
 
 fn split_allowed_urls(allowed_urls: &str) -> Vec<&str> {
@@ -372,6 +447,15 @@ mod tests {
         );
         assert!(loaded.desktop_notification.enabled);
         assert_eq!(loaded.server_chan, ServerChanConfig::default());
+        assert_eq!(
+            loaded.schedule,
+            ScheduleConfig::Daily {
+                time: "09:30".to_string(),
+                every_days: 1,
+            }
+        );
+        assert_eq!(loaded.config_version, 2);
+        assert!(!paths.config_v1_backup.exists());
     }
 
     #[tokio::test]
@@ -490,7 +574,46 @@ mod tests {
         assert!(config.validate().is_err());
 
         config.max_tries = 1;
-        config.daily_at = "24:00".to_string();
+        config.schedule = ScheduleConfig::Daily {
+            time: "24:00".to_string(),
+            every_days: 1,
+        };
         assert!(config.validate().is_err());
+    }
+
+    #[tokio::test]
+    async fn first_v2_save_creates_one_copy_only_v1_backup() {
+        let temp = tempfile::tempdir().expect("create temp dir");
+        let paths = AppPaths::from_root(temp.path().join("app-data"));
+        paths.ensure_directories().expect("create app dirs");
+        let original = serde_json::to_vec_pretty(&serde_json::json!({
+            "configVersion": 1,
+            "command": "echo old",
+            "workDir": temp.path().to_string_lossy(),
+            "interval": 5,
+            "maxTries": 1,
+            "taskName": "Legacy Task",
+            "dailyAt": "07:30"
+        }))
+        .expect("serialize v1");
+        fs::write(&paths.config_file, &original).expect("write v1");
+
+        let mut loaded = load_config(&paths, temp.path())
+            .await
+            .expect("migrate in memory");
+        loaded.command = "echo new".to_string();
+        save_config(&paths, &loaded).await.expect("save v2");
+
+        assert_eq!(
+            fs::read(&paths.config_v1_backup).expect("read backup"),
+            original
+        );
+        let first_backup = fs::read(&paths.config_v1_backup).expect("read first backup");
+        loaded.command = "echo newer".to_string();
+        save_config(&paths, &loaded).await.expect("save v2 again");
+        assert_eq!(
+            fs::read(&paths.config_v1_backup).expect("read stable backup"),
+            first_backup
+        );
     }
 }

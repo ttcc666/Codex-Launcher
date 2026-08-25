@@ -1,7 +1,7 @@
 use crate::app_storage::{
     append_bounded_text_log, atomic_write_bytes, atomic_write_json, read_json, AppPaths,
 };
-use crate::retry_engine::{get_snippet, RunStatus, TaskStatus};
+use crate::retry_engine::{get_snippet, LaunchSource, RunStatus, TaskStatus};
 use crate::run_manager::ProcessLock;
 use chrono::{Local, Utc};
 use tauri::{AppHandle, Emitter};
@@ -129,6 +129,7 @@ fn render_status_html(status: &TaskStatus) -> String {
     <div class="badge">{label}</div>
     <h1>Codex 重试进度</h1>
     <p>Run ID: {run_id}</p>
+    <div class="metric">启动来源: {launch_source}</div>
     <div class="metric">尝试次数: {attempt}</div>
     <div class="metric">高负载次数: {high_demand_count}</div>
     <div class="metric">并发线程数: {concurrency}（活跃 {active_workers}）</div>
@@ -139,6 +140,7 @@ fn render_status_html(status: &TaskStatus) -> String {
 </body>
 </html>"#,
         run_id = html_escape(&status.run_id),
+        launch_source = launch_source_label(status.launch_source),
         attempt = status.attempt,
         high_demand_count = status.high_demand_count,
         concurrency = status.concurrency,
@@ -151,6 +153,15 @@ fn render_status_html(status: &TaskStatus) -> String {
             &status.result_preview
         }),
     )
+}
+
+fn launch_source_label(source: LaunchSource) -> &'static str {
+    match source {
+        LaunchSource::Unknown => "未知 / 旧版本",
+        LaunchSource::Gui => "GUI 手动",
+        LaunchSource::ScheduledTask => "Windows 定时任务",
+        LaunchSource::HeadlessCli => "Headless CLI",
+    }
 }
 
 fn html_escape(value: &str) -> String {

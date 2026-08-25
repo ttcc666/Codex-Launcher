@@ -24,6 +24,8 @@ import {
 import { toast } from "sonner"
 
 import { ModeToggle } from "@/components/mode-toggle"
+import { ScheduleEditor } from "@/components/scheduler/schedule-editor"
+import { TaskHealthPanel } from "@/components/scheduler/task-health-panel"
 import { AnimatedContent } from "@/components/ui/AnimatedContent"
 import { BorderGlow } from "@/components/ui/BorderGlow"
 import { ClickSpark } from "@/components/ui/ClickSpark"
@@ -63,6 +65,7 @@ import {
   useTauri,
   type AppConfig,
   type EmailCredentialStatus,
+  type LaunchSource,
   type ServerChanCredentialStatus,
 } from "@/hooks/useTauri"
 import { cn } from "@/lib/utils"
@@ -259,7 +262,8 @@ export default function App() {
     beginRun,
     clearVisibleLogs,
     isTaskInstalled,
-    taskDetail,
+    taskHealth,
+    isTaskHealthLoading,
     checkTask,
     errors,
     dismissError,
@@ -742,12 +746,16 @@ export default function App() {
               </div>
               <ShinyText text="Codex Launcher" speed={6} className="text-base font-semibold" />
               <span className="text-[11px] font-mono font-normal text-muted-foreground bg-muted px-2 py-0.5 rounded-full border">
-                v2.0
+                v2.2.0
               </span>
             </div>
 
             <div className="ml-auto flex items-center gap-3">
               {statusBadge(state.status)}
+              {taskStatus ? launchSourceBadge(taskStatus.launchSource) : null}
+              {taskStatus?.runMode === "manualKeepAlive" ? (
+                <Badge variant="secondary">手动保活</Badge>
+              ) : null}
               <div className="h-4 w-[1px] bg-border" />
               <ModeToggle />
             </div>
@@ -1626,65 +1634,60 @@ export default function App() {
           </TabsContent>
 
           <TabsContent value="task" className="mt-4">
-            <Card>
-              <CardHeader>
-                <CardTitle>守护进程配置</CardTitle>
-                <CardDescription>注册 Windows 计划任务，让同一 headless 引擎按日执行。</CardDescription>
-              </CardHeader>
-              <CardContent className="flex flex-col gap-6">
-                <div className="flex flex-col gap-4 rounded-lg border bg-muted/50 p-4 sm:flex-row sm:items-center sm:justify-between">
-                  <div className="flex flex-col gap-1">
-                    <p className="font-medium">当前安装状态</p>
-                    <Badge variant={isTaskInstalled ? "default" : "outline"}>
-                      {isTaskInstalled ? "已在系统中注册" : "未注册"}
-                    </Badge>
+            <div className="flex flex-col gap-4">
+              <Card>
+                <CardHeader>
+                  <CardTitle>Windows 计划任务配置</CardTitle>
+                  <CardDescription>
+                    注册高级触发器，触发后通过 <code>--scheduled</code> 运行同一 retry engine。
+                  </CardDescription>
+                </CardHeader>
+                <CardContent className="flex flex-col gap-6">
+                  <div className="flex flex-col gap-4 rounded-lg border bg-muted/50 p-4 sm:flex-row sm:items-center sm:justify-between">
+                    <div className="flex flex-col gap-1">
+                      <p className="font-medium">当前安装状态</p>
+                      <Badge variant={isTaskInstalled ? "default" : "outline"}>
+                        {isTaskInstalled ? "已在系统中注册" : "未注册"}
+                      </Badge>
+                      <p className="text-xs text-muted-foreground">
+                        移除注册不会终止已经运行的任务；请使用 Dashboard 的“停止引擎”。
+                      </p>
+                    </div>
+                    <div className="flex gap-2">
+                      <Button variant="outline" onClick={uninstallTask} disabled={!isTaskInstalled}>
+                        移除任务
+                      </Button>
+                      <Button onClick={installTask} disabled={!configIsValid}>
+                        安装/更新任务
+                      </Button>
+                    </div>
                   </div>
-                  <div className="flex gap-2">
-                    <Button variant="outline" onClick={uninstallTask} disabled={!isTaskInstalled}>
-                      移除任务
-                    </Button>
-                    <Button onClick={installTask} disabled={!configIsValid}>
-                      安装/更新任务
-                    </Button>
-                  </div>
-                </div>
 
-                <FieldGroup>
-                  <div className="grid gap-4 sm:grid-cols-2">
-                    <Field data-invalid={Boolean(validationErrors.taskName)}>
-                      <FieldLabel htmlFor="taskName">计划任务名称</FieldLabel>
-                      <Input
-                        id="taskName"
-                        value={config.taskName}
-                        onChange={(event) => handleConfigChange("taskName", event.currentTarget.value)}
-                        aria-invalid={Boolean(validationErrors.taskName)}
-                      />
-                      <FieldError>{validationErrors.taskName}</FieldError>
-                    </Field>
-                    <Field data-invalid={Boolean(validationErrors.dailyAt)}>
-                      <FieldLabel htmlFor="dailyAt">定时执行（HH:mm）</FieldLabel>
-                      <Input
-                        id="dailyAt"
-                        value={config.dailyAt}
-                        onChange={(event) => handleConfigChange("dailyAt", event.currentTarget.value)}
-                        placeholder="如 03:00"
-                        aria-invalid={Boolean(validationErrors.dailyAt)}
-                      />
-                      <FieldError>{validationErrors.dailyAt}</FieldError>
-                    </Field>
-                  </div>
-                </FieldGroup>
-
-                {isTaskInstalled && taskDetail ? (
-                  <Field>
-                    <FieldLabel>任务详细状态（Windows Task Scheduler）</FieldLabel>
-                    <pre className="max-h-[200px] overflow-auto whitespace-pre-wrap rounded-md bg-muted p-4 font-mono text-xs">
-                      {taskDetail}
-                    </pre>
+                  <Field data-invalid={Boolean(validationErrors.taskName)}>
+                    <FieldLabel htmlFor="taskName">计划任务名称</FieldLabel>
+                    <Input
+                      id="taskName"
+                      value={config.taskName}
+                      onChange={(event) => handleConfigChange("taskName", event.currentTarget.value)}
+                      aria-invalid={Boolean(validationErrors.taskName)}
+                    />
+                    <FieldError>{validationErrors.taskName}</FieldError>
                   </Field>
-                ) : null}
-              </CardContent>
-            </Card>
+
+                  <ScheduleEditor
+                    value={config.schedule}
+                    error={validationErrors.schedule}
+                    onChange={(schedule) => handleConfigChange("schedule", schedule)}
+                  />
+                </CardContent>
+              </Card>
+
+              <TaskHealthPanel
+                health={taskHealth}
+                loading={isTaskHealthLoading}
+                onRefresh={() => void checkTask()}
+              />
+            </div>
           </TabsContent>
           </Tabs>
         </AnimatedContent>
@@ -1810,6 +1813,16 @@ function statusBadge(status: "idle" | "starting" | "running" | "success" | "fail
         </div>
       )
   }
+}
+
+function launchSourceBadge(source: LaunchSource) {
+  const label = {
+    unknown: "来源未知",
+    gui: "GUI 手动",
+    scheduledTask: "Windows 定时任务",
+    headlessCli: "Headless CLI",
+  }[source]
+  return <Badge variant={source === "scheduledTask" ? "default" : "secondary"}>{label}</Badge>
 }
 
 function firstValidationError(errors: Record<string, string | undefined>): string {

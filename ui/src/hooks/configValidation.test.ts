@@ -4,14 +4,14 @@ import { validateConfig } from "./configValidation"
 import type { AppConfig } from "./useTauri"
 
 const validConfig: AppConfig = {
-  configVersion: 1,
+  configVersion: 2,
   command: "echo ok",
   workDir: "C:\\",
   interval: 10,
   maxTries: 0,
   concurrency: 1,
   taskName: "Codex Daily",
-  dailyAt: "08:40",
+  schedule: { kind: "daily", time: "08:40", everyDays: 1 },
   allowedBaseUrls: "https://example.com/API",
   keepAlive: false,
   keepAliveIntervalMinutes: 5,
@@ -57,9 +57,40 @@ describe("config validation", () => {
   })
 
   it("rejects invalid scheduler time and shell metacharacters", () => {
-    expect(validateConfig({ ...validConfig, dailyAt: "24:00" }).dailyAt).toBeTruthy()
+    expect(
+      validateConfig({
+        ...validConfig,
+        schedule: { kind: "daily", time: "24:00", everyDays: 1 },
+      }).schedule,
+    ).toBeTruthy()
     expect(
       validateConfig({ ...validConfig, taskName: "task & whoami" }).taskName,
+    ).toBeTruthy()
+  })
+
+  it("validates advanced triggers and the supported cron subset", () => {
+    expect(
+      validateConfig({
+        ...validConfig,
+        schedule: {
+          kind: "weekly",
+          time: "09:30",
+          everyWeeks: 1,
+          days: [],
+        },
+      }).schedule,
+    ).toBeTruthy()
+    expect(
+      validateConfig({
+        ...validConfig,
+        schedule: { kind: "cron", expression: "30 9 * * MON-FRI" },
+      }).schedule,
+    ).toBeUndefined()
+    expect(
+      validateConfig({
+        ...validConfig,
+        schedule: { kind: "cron", expression: "0,30 9 * * *" },
+      }).schedule,
     ).toBeTruthy()
   })
 

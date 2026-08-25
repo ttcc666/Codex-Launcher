@@ -223,6 +223,7 @@ mod tests {
             child_pids: Vec::new(),
             status: RunStatus::Running,
             run_mode: Default::default(),
+            launch_source: Default::default(),
             keep_alive_enabled: false,
             concurrency: 1,
             active_workers: 1,
@@ -247,6 +248,23 @@ mod tests {
             started_at: "2026-07-31T00:00:00Z".to_string(),
             updated_at: "2026-07-31T00:00:01Z".to_string(),
         }
+    }
+
+    #[test]
+    fn old_status_without_launch_source_defaults_to_unknown() {
+        let temp = tempfile::tempdir().expect("create temp dir");
+        let paths = AppPaths::from_root(temp.path().join("app-data"));
+        let mut value = serde_json::to_value(status(&paths, "legacy-run")).expect("serialize");
+        value
+            .as_object_mut()
+            .expect("status object")
+            .remove("launchSource");
+
+        let parsed: TaskStatus = serde_json::from_value(value).expect("parse legacy status");
+        assert_eq!(
+            parsed.launch_source,
+            crate::retry_engine::LaunchSource::Unknown
+        );
     }
 
     #[tokio::test]

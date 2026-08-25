@@ -10,6 +10,7 @@ mod email_notifier;
 mod notifications;
 mod retry_engine;
 mod run_manager;
+mod schedule;
 mod server_chan;
 mod snapshot;
 mod status_store;
@@ -23,7 +24,9 @@ use email_notifier::{
     delete_email_password, get_email_password, set_email_password, EmailCredentialStatus,
 };
 use notifications::{NotificationService, ServerChanCredentialStatus};
-use retry_engine::{clear_history_logs, start_run, RunMode, RunOptions, RunStatus, TaskStatus};
+use retry_engine::{
+    clear_history_logs, start_run, LaunchSource, RunMode, RunOptions, RunStatus, TaskStatus,
+};
 use run_manager::{KeepAliveTarget, RunManager, ShutdownWaitResult, StopTarget};
 use snapshot::{read_snapshot, SnapshotRequest, SnapshotResponse};
 use status_store::{fail_active_run_if_matches, reconcile_stale_status};
@@ -243,17 +246,20 @@ async fn install_task(config: AppConfig, state: State<'_, AppState>) -> Result<S
     let exe_path =
         env::current_exe().map_err(|error| format!("无法获取当前 exe 路径: {}", error))?;
     save_config_file(&state.paths, &config).await?;
-    task_scheduler::install_daily_task(
+    task_scheduler::install_task(
+        &state.paths,
         &config.task_name,
-        &config.daily_at,
+        &config.schedule,
         &exe_path.to_string_lossy(),
     )
     .await
 }
 
 #[tauri::command]
-async fn uninstall_task(task_name: String) -> Result<String, String> {
-    task_scheduler::uninstall_daily_task(&task_name).await
+async fn uninstall_task(task_name: String, state: State<'_, AppState>) -> Result<String, String> {
+    let exe_path =
+        env::current_exe().map_err(|error| format!("无法获取当前 exe 路径: {}", error))?;
+    task_scheduler::uninstall_task(&state.paths, &task_name, &exe_path.to_string_lossy()).await
 }
 
 #[tauri::command]
@@ -264,6 +270,22 @@ async fn check_task_installed(task_name: String) -> Result<bool, String> {
 #[tauri::command]
 async fn get_task_detail_command(task_name: String) -> Result<String, String> {
     task_scheduler::get_task_detail(&task_name).await
+}
+
+#[tauri::command]
+async fn get_task_health_command(
+    config: AppConfig,
+    state: State<'_, AppState>,
+) -> Result<task_scheduler::TaskHealth, String> {
+    let exe_path =
+        env::current_exe().map_err(|error| format!("无法获取当前 exe 路径: {}", error))?;
+    task_scheduler::get_task_health(
+        &state.paths,
+        &config.task_name,
+        &config.schedule,
+        &exe_path.to_string_lossy(),
+    )
+    .await
 }
 
 #[tauri::command]
@@ -330,21 +352,31 @@ fn run_options_from_config(
 enum LaunchMode {
     Gui,
     Headless,
+    Scheduled,
     UninstallCleanup,
 }
 
 impl LaunchMode {
     fn detect(arguments: impl IntoIterator<Item = String>) -> Self {
         let mut headless = false;
+        let mut scheduled = false;
+        let mut uninstall_cleanup = false;
         for argument in arguments {
             if argument == "--uninstall-cleanup" {
-                return Self::UninstallCleanup;
+                uninstall_cleanup = true;
             }
             if argument == "--headless" {
                 headless = true;
             }
+            if argument == "--scheduled" {
+                scheduled = true;
+            }
         }
-        if headless {
+        if uninstall_cleanup {
+            Self::UninstallCleanup
+        } else if scheduled {
+            Self::Scheduled
+        } else if headless {
             Self::Headless
         } else {
             Self::Gui
@@ -388,6 +420,7 @@ async fn run_headless(
     startup_dir: PathBuf,
     run_manager: Arc<RunManager>,
     notification_service: Arc<NotificationService>,
+    launch_source: LaunchSource,
 ) -> HeadlessOutcome {
     let config = match load_config(&paths, &startup_dir).await {
         Ok(config) => config,
@@ -400,7 +433,7 @@ async fn run_headless(
         None,
         run_manager,
         paths.clone(),
-        run_options_from_config(config, &notification_service),
+        run_options_from_config(config, &notification_service).with_launch_source(launch_source),
     )
     .await
     {
@@ -475,21 +508,52 @@ async fn run_uninstall_cleanup(
             false
         }
     };
-    if !paths.config_file.exists() {
-        return if credential_removed {
-            UninstallCleanupOutcome::Completed
-        } else {
-            UninstallCleanupOutcome::Skipped
-        };
-    }
-
-    let config = match read_json::<AppConfig>(&paths.config_file) {
-        Ok(config) => config,
-        Err(error) => return record_uninstall_failure(paths, error),
+    let fallback_task_name = if paths.config_file.exists() {
+        match read_json::<serde_json::Value>(&paths.config_file) {
+            Ok(value) => value
+                .get("taskName")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string),
+            Err(error) => {
+                record_uninstall_warning(paths, &error);
+                None
+            }
+        }
+    } else {
+        None
     };
-    match task_scheduler::cleanup_daily_task(&config.task_name).await {
-        Ok(task_scheduler::TaskCleanupOutcome::Removed)
-        | Ok(task_scheduler::TaskCleanupOutcome::NotFound) => UninstallCleanupOutcome::Completed,
+    let had_scheduler_state = paths.scheduler_state.exists();
+    let exe_path = match env::current_exe() {
+        Ok(path) => path,
+        Err(error) => {
+            return record_uninstall_failure(
+                paths,
+                format!("卸载时无法获取当前 exe 路径: {}", error),
+            )
+        }
+    };
+    match task_scheduler::cleanup_all_managed_tasks(
+        paths,
+        fallback_task_name.as_deref(),
+        &exe_path.to_string_lossy(),
+    )
+    .await
+    {
+        Ok(report) => {
+            for warning in &report.skipped {
+                record_uninstall_warning(paths, warning);
+            }
+            if credential_removed
+                || had_scheduler_state
+                || fallback_task_name.is_some()
+                || report.removed > 0
+                || report.not_found > 0
+            {
+                UninstallCleanupOutcome::Completed
+            } else {
+                UninstallCleanupOutcome::Skipped
+            }
+        }
         Err(error) => record_uninstall_failure(paths, error),
     }
 }
@@ -526,7 +590,7 @@ fn record_uninstall_failure(paths: &AppPaths, message: String) -> UninstallClean
 async fn main() -> ExitCode {
     let startup_dir = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let launch_mode = LaunchMode::detect(env::args().skip(1));
-    let is_headless = launch_mode == LaunchMode::Headless;
+    let is_background = matches!(launch_mode, LaunchMode::Headless | LaunchMode::Scheduled);
     let paths = match AppPaths::discover() {
         Ok(paths) => paths,
         Err(error) => {
@@ -536,7 +600,7 @@ async fn main() -> ExitCode {
     };
     let credential_store: Arc<dyn CredentialStore> = Arc::new(WindowsCredentialStore);
     if let Err(error) = paths.ensure_directories() {
-        if is_headless {
+        if is_background {
             let outcome = record_headless_outcome(&paths, HeadlessOutcome::ConfigFailure(error));
             return outcome.exit_code();
         }
@@ -565,7 +629,7 @@ async fn main() -> ExitCode {
         legacy_log_dirs.push(exe_dir.join("logs"));
     }
     if let Err(error) = paths.migrate_legacy_config(legacy_log_dirs) {
-        if is_headless {
+        if is_background {
             let _ = record_headless_outcome(
                 &paths,
                 HeadlessOutcome::ConfigFailure(format!("legacy 配置迁移失败: {error}")),
@@ -589,17 +653,28 @@ async fn main() -> ExitCode {
     ));
 
     if let Err(error) = reconcile_stale_status(&paths, None) {
-        if is_headless {
+        if is_background {
             let outcome = record_headless_outcome(&paths, HeadlessOutcome::ConfigFailure(error));
             return outcome.exit_code();
         }
         eprintln!("启动时恢复 stale status 失败: {}", error);
     }
 
-    if launch_mode == LaunchMode::Headless {
-        return run_headless(paths, startup_dir, run_manager, notification_service)
-            .await
-            .exit_code();
+    if matches!(launch_mode, LaunchMode::Headless | LaunchMode::Scheduled) {
+        let launch_source = if launch_mode == LaunchMode::Scheduled {
+            LaunchSource::ScheduledTask
+        } else {
+            LaunchSource::HeadlessCli
+        };
+        return run_headless(
+            paths,
+            startup_dir,
+            run_manager,
+            notification_service,
+            launch_source,
+        )
+        .await
+        .exit_code();
     }
 
     let manager_for_close = run_manager.clone();
@@ -636,6 +711,7 @@ async fn main() -> ExitCode {
             uninstall_task,
             check_task_installed,
             get_task_detail_command,
+            get_task_health_command,
             clear_history_logs_command,
             open_dashboard_url,
             open_log_directory,
@@ -758,6 +834,10 @@ mod tests {
             LaunchMode::UninstallCleanup
         );
         assert_eq!(
+            LaunchMode::detect(["--headless".to_string(), "--scheduled".to_string()]),
+            LaunchMode::Scheduled
+        );
+        assert_eq!(
             UninstallCleanupOutcome::Completed.exit_code(),
             ExitCode::SUCCESS
         );
@@ -783,10 +863,10 @@ mod tests {
         );
         std::fs::write(&paths.config_file, b"{ corrupt").expect("write corrupt config");
 
-        assert!(matches!(
+        assert_eq!(
             run_uninstall_cleanup(&paths, credentials).await,
-            UninstallCleanupOutcome::Failed(_)
-        ));
+            UninstallCleanupOutcome::Skipped
+        );
         assert!(paths.uninstall_log.exists());
         assert!(!paths.status_file.exists());
         assert!(!paths.run_lock.exists());

@@ -1,6 +1,6 @@
 [package]
 name = "codex-launcher"
-version = "2.1.0"
+version = "2.2.0"
 description = "Codex 重试可视化启动器 (Rust + Tauri 原生集成版)"
 authors = ["Codex Team"]
 edition = "2021"

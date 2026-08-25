@@ -18,7 +18,7 @@ import {
   type PipelineState,
   type SnapshotResponse,
 } from "./logPipeline"
-import { isConfigValid } from "./configValidation"
+import { isConfigValid, validateSchedule } from "./configValidation"
 import {
   errorQueueReducer,
   type QueuedError,
@@ -32,7 +32,7 @@ export interface AppConfig {
   maxTries: number
   concurrency: number
   taskName: string
-  dailyAt: string
+  schedule: ScheduleConfig
   allowedBaseUrls: string
   keepAlive: boolean
   keepAliveIntervalMinutes: number
@@ -40,6 +40,45 @@ export interface AppConfig {
   serverChan: ServerChanConfig
   email: EmailNotificationConfig
 }
+
+export type Weekday =
+  | "monday"
+  | "tuesday"
+  | "wednesday"
+  | "thursday"
+  | "friday"
+  | "saturday"
+  | "sunday"
+
+export type Month =
+  | "january"
+  | "february"
+  | "march"
+  | "april"
+  | "may"
+  | "june"
+  | "july"
+  | "august"
+  | "september"
+  | "october"
+  | "november"
+  | "december"
+
+export type MonthlyDay = { kind: "day"; day: number } | { kind: "lastDay" }
+
+export type ScheduleConfig =
+  | { kind: "daily"; time: string; everyDays: number }
+  | { kind: "weekly"; time: string; everyWeeks: number; days: Weekday[] }
+  | { kind: "monthly"; time: string; day: MonthlyDay; months: Month[] }
+  | {
+      kind: "interval"
+      unit: "minutes" | "hours"
+      every: number
+      startTime: string
+    }
+  | { kind: "atLogon"; delaySeconds: number }
+  | { kind: "atStartup"; delaySeconds: number }
+  | { kind: "cron"; expression: string }
 
 export interface DesktopNotificationConfig {
   enabled: boolean
@@ -73,6 +112,7 @@ export type RunStatus =
   | "stopped"
 
 export type RunMode = "retry" | "manualKeepAlive"
+export type LaunchSource = "unknown" | "gui" | "scheduledTask" | "headlessCli"
 
 export interface TaskStatus {
   runId: string
@@ -81,6 +121,7 @@ export interface TaskStatus {
   childPids: number[]
   status: RunStatus
   runMode: RunMode
+  launchSource: LaunchSource
   keepAliveEnabled: boolean
   concurrency: number
   activeWorkers: number
@@ -100,6 +141,28 @@ export interface TaskStatus {
   resultPreview: string
   startedAt: string
   updatedAt: string
+}
+
+export interface TaskHealth {
+  installed: boolean
+  state: "ready" | "running" | "disabled" | "queued" | "unknown" | null
+  stateLabel: string | null
+  enabled: boolean
+  nextRunTime: string | null
+  lastRunTime: string | null
+  lastResult: number | null
+  lastResultHex: string | null
+  lastResultLabel: string | null
+  missedRuns: number
+  actionPath: string | null
+  actionArguments: string | null
+  actionMatchesApp: boolean
+  managed: boolean
+  configDrift: boolean
+  appliedScheduleSummary: string | null
+  desiredScheduleSummary: string
+  staleManagedTasks: string[]
+  warnings: string[]
 }
 
 export interface AppViewState {
@@ -123,14 +186,14 @@ const IDLE_POLL_MS = 1_500
 const ERROR_POLL_MS = 2_000
 
 const initialConfig: AppConfig = {
-  configVersion: 1,
+  configVersion: 2,
   command: "",
   workDir: "",
   interval: 10,
   maxTries: 0,
   concurrency: 1,
   taskName: "CodexDailyRetry0840",
-  dailyAt: "08:40",
+  schedule: { kind: "daily", time: "08:40", everyDays: 1 },
   allowedBaseUrls: "",
   keepAlive: false,
   keepAliveIntervalMinutes: 5,
@@ -153,8 +216,8 @@ export function useTauri() {
   const [config, setConfig] = useState<AppConfig>(initialConfig)
   const [taskStatus, setTaskStatus] = useState<TaskStatus | null>(null)
   const [logs, setLogsState] = useState<string[]>([])
-  const [isTaskInstalled, setIsTaskInstalled] = useState(false)
-  const [taskDetail, setTaskDetail] = useState("")
+  const [taskHealth, setTaskHealth] = useState<TaskHealth | null>(null)
+  const [isTaskHealthLoading, setIsTaskHealthLoading] = useState(false)
   const [isLoaded, setIsLoaded] = useState(false)
   const [errors, dispatchError] = useReducer(errorQueueReducer, [])
   const [pendingRunId, setPendingRunId] = useState<string | undefined>(undefined)
@@ -169,6 +232,8 @@ export function useTauri() {
   const localRunIdRef = useRef<string | undefined>(undefined)
   const triggerPollRef = useRef<() => void>(() => undefined)
   const errorIdRef = useRef(0)
+  const configRef = useRef(config)
+  configRef.current = config
 
   const replaceLogs = useCallback((next: string[]) => {
     logsRef.current = next
@@ -375,29 +440,28 @@ export function useTauri() {
   const checkTask = useCallback(async () => {
     const sequence = ++taskRequestSequenceRef.current
     const taskName = config.taskName.trim()
-    if (!taskName) {
-      setIsTaskInstalled(false)
-      setTaskDetail("")
+    if (!taskName || validateSchedule(config.schedule)) {
+      setTaskHealth(null)
+      setIsTaskHealthLoading(false)
       return
     }
+    setIsTaskHealthLoading(true)
     try {
-      const installed = await invoke<boolean>("check_task_installed", { taskName })
+      const health = await invoke<TaskHealth>("get_task_health_command", {
+        config: configRef.current,
+      })
       if (sequence !== taskRequestSequenceRef.current) return
-      setIsTaskInstalled(installed)
-      if (installed) {
-        const detail = await invoke<string>("get_task_detail_command", { taskName })
-        if (sequence !== taskRequestSequenceRef.current) return
-        setTaskDetail(detail)
-      } else {
-        setTaskDetail("")
-      }
+      setTaskHealth(health)
     } catch (error: unknown) {
       if (sequence !== taskRequestSequenceRef.current) return
-      setIsTaskInstalled(false)
-      reportError("scheduler", "查询计划任务失败", error)
-      setTaskDetail("")
+      setTaskHealth(null)
+      reportError("scheduler", "查询计划任务健康状态失败", error)
+    } finally {
+      if (sequence === taskRequestSequenceRef.current) {
+        setIsTaskHealthLoading(false)
+      }
     }
-  }, [config.taskName, reportError])
+  }, [config.schedule, config.taskName, reportError])
 
   useEffect(() => {
     const timer = window.setTimeout(() => void checkTask(), 500)
@@ -427,8 +491,9 @@ export function useTauri() {
     logs,
     beginRun,
     clearVisibleLogs,
-    isTaskInstalled,
-    taskDetail,
+    isTaskInstalled: taskHealth?.installed ?? false,
+    taskHealth,
+    isTaskHealthLoading,
     checkTask,
     errors,
     dismissError,

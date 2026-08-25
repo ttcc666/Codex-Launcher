@@ -763,6 +763,7 @@ mod tests {
             child_pids: Vec::new(),
             status,
             run_mode: RunMode::Retry,
+            launch_source: Default::default(),
             keep_alive_enabled: false,
             concurrency: 1,
             active_workers: 0,

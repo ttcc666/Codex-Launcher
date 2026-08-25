@@ -64,6 +64,16 @@ pub enum RunMode {
     ManualKeepAlive,
 }
 
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum LaunchSource {
+    #[default]
+    Unknown,
+    Gui,
+    ScheduledTask,
+    HeadlessCli,
+}
+
 impl RunStatus {
     pub fn is_active(self) -> bool {
         matches!(self, Self::Starting | Self::Running)
@@ -81,6 +91,8 @@ pub struct TaskStatus {
     pub status: RunStatus,
     #[serde(default)]
     pub run_mode: RunMode,
+    #[serde(default)]
+    pub launch_source: LaunchSource,
     #[serde(default)]
     pub keep_alive_enabled: bool,
     #[serde(default = "default_concurrency")]
@@ -127,6 +139,7 @@ pub struct RunOptions {
     pub keep_alive: bool,
     pub keep_alive_interval: Duration,
     pub run_mode: RunMode,
+    pub launch_source: LaunchSource,
     notification_sink: Arc<dyn NotificationSink>,
     shell_program: OsString,
 }
@@ -149,6 +162,7 @@ impl RunOptions {
             keep_alive: false,
             keep_alive_interval: Duration::from_secs(300),
             run_mode: RunMode::Retry,
+            launch_source: LaunchSource::Gui,
             notification_sink: Arc::new(NoopNotificationSink),
             shell_program: std::env::var_os("ComSpec").unwrap_or_else(|| OsString::from("cmd.exe")),
         }
@@ -167,6 +181,11 @@ impl RunOptions {
 
     pub fn with_run_mode(mut self, run_mode: RunMode) -> Self {
         self.run_mode = run_mode;
+        self
+    }
+
+    pub fn with_launch_source(mut self, launch_source: LaunchSource) -> Self {
+        self.launch_source = launch_source;
         self
     }
 
@@ -253,6 +272,7 @@ struct StatusBuilder {
     owner_pid: u32,
     child_pids: BTreeMap<usize, u32>,
     run_mode: RunMode,
+    launch_source: LaunchSource,
     concurrency: u64,
     active_workers: u64,
     keep_alive_enabled: bool,
@@ -279,6 +299,7 @@ impl StatusBuilder {
             owner_pid: std::process::id(),
             child_pids: BTreeMap::new(),
             run_mode: options.run_mode,
+            launch_source: options.launch_source,
             concurrency: options.effective_concurrency(),
             active_workers: 0,
             keep_alive_enabled: options.keep_alive,
@@ -319,6 +340,7 @@ impl StatusBuilder {
             child_pids: self.child_pids.values().copied().collect(),
             status,
             run_mode: self.run_mode,
+            launch_source: self.launch_source,
             keep_alive_enabled: self.keep_alive_enabled,
             concurrency: self.concurrency,
             active_workers: self.active_workers,

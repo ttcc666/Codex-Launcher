@@ -12,6 +12,8 @@ pub struct AppPaths {
     pub root_dir: PathBuf,
     pub logs_dir: PathBuf,
     pub config_file: PathBuf,
+    pub config_v1_backup: PathBuf,
+    pub scheduler_state: PathBuf,
     pub status_file: PathBuf,
     pub status_html: PathBuf,
     pub latest_log: PathBuf,
@@ -37,6 +39,8 @@ impl AppPaths {
         let logs_dir = root_dir.join("logs");
         Self {
             config_file: root_dir.join("launcher-config.json"),
+            config_v1_backup: root_dir.join("launcher-config.v1.backup.json"),
+            scheduler_state: root_dir.join("scheduler-state.json"),
             status_file: root_dir.join("status.json"),
             status_html: root_dir.join("status.html"),
             run_lock: root_dir.join("run.lock"),
