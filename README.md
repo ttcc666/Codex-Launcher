@@ -122,6 +122,26 @@ cargo build --release
 
 Release EXE 位于 `src-tauri\target\release\codex-launcher.exe`。
 
+## Release 脚本
+
+`scripts\release.ps1` 会校验 `src-tauri\Cargo.toml` 与 `src-tauri\tauri.conf.json` 的版本一致，依次运行 frontend/Rust quality gates，构建 NSIS + MSI，并在 `artifacts\v<version>` 生成安装包与 `SHA256SUMS.txt`。
+
+```powershell
+# 只预览流程，不执行构建或发布
+powershell -NoProfile -ExecutionPolicy Bypass -File '.\scripts\release.ps1' -DryRun
+
+# 构建 unsigned 本地产物（默认不会发布）
+powershell -NoProfile -ExecutionPolicy Bypass -File '.\scripts\release.ps1'
+
+# 使用 README 下方所述证书环境变量，构建 signed 本地产物
+powershell -NoProfile -ExecutionPolicy Bypass -File '.\scripts\release.ps1' -Signed
+
+# 工作区干净时：构建、创建并推送 tag、发布 GitHub Release
+powershell -NoProfile -ExecutionPolicy Bypass -File '.\scripts\release.ps1' -Version '2.1.0' -Signed -Publish
+```
+
+`-Version` 是 expected version（预期版本）校验，不会自动修改源码；发布新版本前应先同步两个版本文件并提交。`-Publish` 需要已登录的 GitHub CLI（`gh auth login`），也可搭配 `-Draft`、`-Prerelease` 或 `-NotesFile '.\RELEASE_NOTES.md'`。如果构建成功但 GitHub 发布失败，可以修复网络或权限后用同一命令重试；脚本会复用指向当前 commit 的 tag。
+
 ## Windows 安装包
 
 Unsigned local bundle（开发/测试）：
@@ -132,9 +152,9 @@ npm ci
 npm run bundle:unsigned
 
 # 产物应为 unsigned；检查 Authenticode 状态和 SHA-256
-Get-AuthenticodeSignature '..\\src-tauri\\target\\release\\bundle\\nsis\\Codex-Launcher_2.0.0_x64-setup.exe'
-Get-FileHash '..\\src-tauri\\target\\release\\bundle\\nsis\\Codex-Launcher_2.0.0_x64-setup.exe' -Algorithm SHA256
-Get-FileHash '..\\src-tauri\\target\\release\\bundle\\msi\\Codex-Launcher_2.0.0_x64_en-US.msi' -Algorithm SHA256
+Get-AuthenticodeSignature '..\\src-tauri\\target\\release\\bundle\\nsis\\Codex-Launcher_2.1.0_x64-setup.exe'
+Get-FileHash '..\\src-tauri\\target\\release\\bundle\\nsis\\Codex-Launcher_2.1.0_x64-setup.exe' -Algorithm SHA256
+Get-FileHash '..\\src-tauri\\target\\release\\bundle\\msi\\Codex-Launcher_2.1.0_x64_en-US.msi' -Algorithm SHA256
 ```
 
 Signed bundle 要求证书已导入 Windows certificate store，并显式提供环境变量：
@@ -150,8 +170,8 @@ npm run bundle:signed
 
 默认产物：
 
-- NSIS：`src-tauri\target\release\bundle\nsis\Codex-Launcher_2.0.0_x64-setup.exe`
-- MSI：`src-tauri\target\release\bundle\msi\Codex-Launcher_2.0.0_x64_en-US.msi`
+- NSIS：`src-tauri\target\release\bundle\nsis\Codex-Launcher_2.1.0_x64-setup.exe`
+- MSI：`src-tauri\target\release\bundle\msi\Codex-Launcher_2.1.0_x64_en-US.msi`
 
 Installer customization 依据 Tauri 官方文档：
 

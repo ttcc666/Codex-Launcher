@@ -3,6 +3,8 @@ logs/
 codex-launcher.exe
 *.log
 /run.lock
+/artifacts/
+/.pi-glla/
 
 # Node.js
 ui/node_modules/
