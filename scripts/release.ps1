@@ -90,6 +90,25 @@ function Invoke-NativeCapture {
     return ($output -join [Environment]::NewLine)
 }
 
+function Test-NativeCommand {
+    param(
+        [Parameter(Mandatory = $true)][string]$FilePath,
+        [string[]]$ArgumentList = @(),
+        [Parameter(Mandatory = $true)][string]$WorkingDirectory
+    )
+
+    Push-Location -LiteralPath $WorkingDirectory
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        & $FilePath @ArgumentList *> $null
+        return $LASTEXITCODE -eq 0
+    } finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+        Pop-Location
+    }
+}
+
 function Get-SingleArtifact {
     param(
         [Parameter(Mandatory = $true)][string]$Directory,
@@ -210,16 +229,23 @@ if ($Publish -and -not $DryRun) {
 
     Invoke-NativeCommand -FilePath $gh -WorkingDirectory $repoRoot -ArgumentList @('auth', 'status')
 
-    & $gh 'release' 'view' $tag '--json' 'url' *> $null
-    if ($LASTEXITCODE -eq 0) {
+    $releaseExists = Test-NativeCommand -FilePath $gh -WorkingDirectory $repoRoot -ArgumentList @(
+        'release', 'view', $tag, '--json', 'url'
+    )
+    if ($releaseExists) {
         throw "GitHub Release $tag 已存在。"
     }
 
     $headCommit = Invoke-NativeCapture -FilePath $git -WorkingDirectory $repoRoot -ArgumentList @('rev-parse', 'HEAD')
-    $tagCommit = & $git 'rev-list' '-n' '1' $tag 2>$null
-    if ($LASTEXITCODE -eq 0) {
+    $localTagExists = Test-NativeCommand -FilePath $git -WorkingDirectory $repoRoot -ArgumentList @(
+        'show-ref', '--verify', '--quiet', "refs/tags/$tag"
+    )
+    if ($localTagExists) {
+        $tagCommit = Invoke-NativeCapture -FilePath $git -WorkingDirectory $repoRoot -ArgumentList @(
+            'rev-list', '-n', '1', $tag
+        )
         $localTagExists = $true
-        if (($tagCommit -join '').Trim() -ne $headCommit.Trim()) {
+        if ($tagCommit.Trim() -ne $headCommit.Trim()) {
             throw "本地 tag $tag 未指向当前 HEAD。"
         }
     }
