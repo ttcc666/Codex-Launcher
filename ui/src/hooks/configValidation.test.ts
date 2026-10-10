@@ -28,6 +28,10 @@ const validConfig: AppConfig = {
     smtpUsername: "",
     toAddress: "",
   },
+  proxy: {
+    enabled: false,
+    url: "",
+  },
 }
 
 describe("config validation", () => {
@@ -116,5 +120,31 @@ describe("config validation", () => {
     expect(serialized).toContain('"serverChan"')
     expect(serialized.toLowerCase()).not.toContain("sendkey")
     expect(serialized.toLowerCase()).not.toContain("send_key")
+  })
+
+  it("accepts valid proxy URLs when enabled and rejects invalid ones", () => {
+    for (const url of [
+      "http://127.0.0.1:7890",
+      "https://proxy.example.com:8080",
+      "socks5://127.0.0.1:1080",
+      "socks5h://127.0.0.1:1080",
+      "http://user:pass@127.0.0.1:7890",
+    ]) {
+      expect(
+        validateConfig({ ...validConfig, proxy: { enabled: true, url } }).proxy,
+      ).toBeUndefined()
+    }
+
+    for (const url of ["", "ftp://127.0.0.1:7890", "127.0.0.1:7890", "not-a-url"]) {
+      expect(
+        validateConfig({ ...validConfig, proxy: { enabled: true, url } }).proxy,
+      ).toBeTruthy()
+    }
+  })
+
+  it("allows an empty proxy URL when the proxy is disabled", () => {
+    expect(
+      validateConfig({ ...validConfig, proxy: { enabled: false, url: "" } }).proxy,
+    ).toBeUndefined()
   })
 })

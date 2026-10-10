@@ -45,7 +45,19 @@ Server酱免费额度为每天 5 条。运行通知只有一个固定条件：�
 
 通知发送是 bounded best-effort：HTTPS 请求固定到 `sctapi.ftqq.com`，连接 timeout 为 3 秒，完整 delivery 总预算不超过 8 秒；连接失败及明确的 transient HTTP 状态最多重试一次，响应确认超时不会自动重试，并提示“通知可能已送达”，避免重复消耗额度。HTTP/网络/API 失败只写入 `logs\\notifications.log`（上限 1 MiB），不会改变 run 的 terminal status、Headless exit code 或 GUI 主流程。第一版没有 durable outbox，断电或进程被强制终止时不保证补发。
 
-卸载 NSIS/MSI 前会尝试删除 Credential Manager 中的 SendKey 和计划任务。凭据不存在视为成功；实际清理错误写入 `logs\\uninstall.log`，不会记录 SendKey 内容。
+卸载 NSIS/MSI 前会尝试删除 Credential Manager 中的 SendKey、SMTP 密码和代理密码，以及计划任务。凭据不存在视为成功；实际清理错误写入 `logs\\uninstall.log`，不会记录凭据内容。
+
+## 网络代理
+
+GUI 的「网络」Tab 提供统一的代理配置，保存后作用于两类出站流量：
+
+- **重试命令子进程**：启动的 shell command（如 `codex`）会继承 `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` 环境变量（同时写入大小写变体以兼容不同工具链），让子进程及其依赖的网络请求走配置的代理。
+- **Server酱个人微信通知**：HTTPS 请求通过配置的代理发送。
+- **邮件 SMTP 通知**：暂不支持代理，保持系统默认行为（lettre 无 HTTP 代理支持）。
+
+代理 URL 支持 `http` / `https` / `socks5` / `socks5h`，可携带 `user:pass@host:port` 鉴权。保存时后端会从 URL 中抽离密码，单独存入 Windows Credential Manager（service `CodexLauncher`、account `proxy-password`），URL 其余部分明文写入 `launcher-config.json`，与 SMTP host 等字段同级。
+
+代理配置是配置的一部分（`proxy.enabled` / `proxy.url`），不升级配置版本号，旧配置加载时 `proxy` 回落为禁用空 URL。运行中修改代理对已启动的子进程不生效（环境变量在 spawn 时固化），新启动的 run 与新通知会使用最新配置。
 
 ## 数据目录
 

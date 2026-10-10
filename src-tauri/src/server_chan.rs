@@ -63,11 +63,12 @@ pub struct ServerChanClient {
 }
 
 impl ServerChanClient {
-    pub fn production() -> Self {
-        let transport: Arc<dyn ServerChanTransport> = match ReqwestServerChanTransport::new() {
-            Ok(transport) => Arc::new(transport),
-            Err(error) => Arc::new(UnavailableTransport { error }),
-        };
+    pub fn production(proxy_url: Option<String>) -> Self {
+        let transport: Arc<dyn ServerChanTransport> =
+            match ReqwestServerChanTransport::new(proxy_url) {
+                Ok(transport) => Arc::new(transport),
+                Err(error) => Arc::new(UnavailableTransport { error }),
+            };
         Self { transport }
     }
 
@@ -144,10 +145,16 @@ struct ReqwestServerChanTransport {
 }
 
 impl ReqwestServerChanTransport {
-    fn new() -> Result<Self, String> {
-        reqwest::Client::builder()
+    fn new(proxy_url: Option<String>) -> Result<Self, String> {
+        let mut builder = reqwest::Client::builder()
             .connect_timeout(CONNECT_TIMEOUT)
-            .redirect(Policy::none())
+            .redirect(Policy::none());
+        if let Some(proxy) = proxy_url {
+            let proxy = reqwest::Proxy::all(&proxy)
+                .map_err(|error| format!("初始化 Server酱代理失败: {error}"))?;
+            builder = builder.proxy(proxy);
+        }
+        builder
             .build()
             .map(|client| Self { client })
             .map_err(|_| "初始化 Server酱 HTTP client 失败".to_string())

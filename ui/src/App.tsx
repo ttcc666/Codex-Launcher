@@ -11,6 +11,7 @@ import {
   FolderOpenIcon,
   KeyRoundIcon,
   MailIcon,
+  NetworkIcon,
   PlayIcon,
   SearchIcon,
   ServerCrashIcon,
@@ -30,7 +31,6 @@ import { AnimatedContent } from "@/components/ui/AnimatedContent"
 import { BorderGlow } from "@/components/ui/BorderGlow"
 import { ClickSpark } from "@/components/ui/ClickSpark"
 import { CountUp } from "@/components/ui/CountUp"
-import { GradualBlur } from "@/components/ui/GradualBlur"
 import { ShinyText } from "@/components/ui/ShinyText"
 import { SpotlightCard } from "@/components/ui/SpotlightCard"
 import {
@@ -62,10 +62,16 @@ import { Switch } from "@/components/ui/switch"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { validateConfig } from "@/hooks/configValidation"
 import {
+  buildProcessPanels,
+  type ProcessPanel,
+  type ProcessPanelStatus,
+} from "@/hooks/processPanels"
+import {
   useTauri,
   type AppConfig,
   type EmailCredentialStatus,
   type LaunchSource,
+  type ProxyCredentialStatus,
   type ServerChanCredentialStatus,
 } from "@/hooks/useTauri"
 import { cn } from "@/lib/utils"
@@ -77,12 +83,14 @@ function parseLogLine(rawLine: string) {
   let content = rawLine
 
   const timestampMatch = rawLine.match(
-    /^(\[\d{4}-\d{2}-\d{2}\s\d{2}:\d{2}:\d{2}(?:\.\d+)?\]|\[\d{2}:\d{2}:\d{2}(?:\.\d+)?\]|\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z?)\s*/,
+    /^\[(?:\d{4}-\d{2}-\d{2}\s+)?(\d{2}:\d{2}:\d{2}(?:\.\d+)?)\]\s*|^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z?)\s*/,
   )
   if (timestampMatch) {
-    timestamp = timestampMatch[1]
+    timestamp = timestampMatch[1] ?? timestampMatch[2] ?? ""
     content = rawLine.slice(timestampMatch[0].length)
   }
+
+  content = content.replace(/^\[(?:w\d+)\]\s*/, "").replace(/^\[(?:launcher|stdout|stderr)\]\s*/, "")
 
   let level: LogLevel = "default"
   const upperContent = rawLine.toUpperCase()
@@ -98,6 +106,8 @@ function parseLogLine(rawLine: string) {
   } else if (
     upperContent.includes("429") ||
     upperContent.includes("HIGH_DEMAND") ||
+    upperContent.includes("EXPERIENCING HIGH DEMAND") ||
+    rawLine.includes("高负载") ||
     rawLine.includes("拥堵") ||
     rawLine.includes("拦截")
   ) {
@@ -112,7 +122,7 @@ function parseLogLine(rawLine: string) {
   } else if (
     upperContent.includes("SUCCESS") ||
     upperContent.includes("OK") ||
-    rawLine.includes("成功") ||
+    (rawLine.includes("成功") && !rawLine.includes("任一线程成功")) ||
     rawLine.includes("正常完成")
   ) {
     level = "success"
@@ -120,7 +130,9 @@ function parseLogLine(rawLine: string) {
     upperContent.includes("INFO") ||
     rawLine.includes("信息") ||
     rawLine.includes("开始") ||
-    rawLine.includes("启动")
+    rawLine.includes("启动") ||
+    rawLine.includes("并发线程数") ||
+    rawLine.includes("尝试执行中")
   ) {
     level = "info"
   }
@@ -154,11 +166,11 @@ function highlightUrlsAndPaths(text: string, level: LogLevel) {
         key={idx}
         className={cn(
           level === "error" && "text-rose-300 font-medium",
-          level === "warn" && "text-amber-200",
+          level === "warn" && "text-amber-200/90",
           level === "success" && "text-emerald-200 font-medium",
           level === "rate_limit" && "text-purple-200 font-medium",
           level === "info" && "text-zinc-100",
-          level === "default" && "text-zinc-200",
+          level === "default" && "text-zinc-300",
         )}
       >
         {part}
@@ -180,27 +192,27 @@ function FormattedLogLine({
 
   const badgeMap = {
     error: (
-      <span className="shrink-0 select-none rounded bg-rose-500/15 px-1.5 py-0.5 text-[10px] font-bold tracking-wider text-rose-400 border border-rose-500/30">
-        ERROR
+      <span className="shrink-0 select-none rounded bg-rose-500/15 px-1 py-0 text-[9.5px] leading-4 font-bold tracking-wider text-rose-400 border border-rose-500/30">
+        ERR
       </span>
     ),
     rate_limit: (
-      <span className="shrink-0 select-none rounded bg-purple-500/15 px-1.5 py-0.5 text-[10px] font-bold tracking-wider text-purple-300 border border-purple-500/30">
-        429 LIMIT
+      <span className="shrink-0 select-none rounded bg-purple-500/15 px-1 py-0 text-[9.5px] leading-4 font-bold tracking-wider text-purple-300 border border-purple-500/30">
+        429
       </span>
     ),
     warn: (
-      <span className="shrink-0 select-none rounded bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-bold tracking-wider text-amber-300 border border-amber-500/30">
+      <span className="shrink-0 select-none rounded bg-amber-500/15 px-1 py-0 text-[9.5px] leading-4 font-bold tracking-wider text-amber-300 border border-amber-500/30">
         WARN
       </span>
     ),
     success: (
-      <span className="shrink-0 select-none rounded bg-emerald-500/15 px-1.5 py-0.5 text-[10px] font-bold tracking-wider text-emerald-300 border border-emerald-500/30">
-        SUCCESS
+      <span className="shrink-0 select-none rounded bg-emerald-500/15 px-1 py-0 text-[9.5px] leading-4 font-bold tracking-wider text-emerald-300 border border-emerald-500/30">
+        OK
       </span>
     ),
     info: (
-      <span className="shrink-0 select-none rounded bg-sky-500/15 px-1.5 py-0.5 text-[10px] font-bold tracking-wider text-sky-300 border border-sky-500/30">
+      <span className="shrink-0 select-none rounded bg-sky-500/15 px-1 py-0 text-[9.5px] leading-4 font-bold tracking-wider text-sky-300 border border-sky-500/30">
         INFO
       </span>
     ),
@@ -226,19 +238,19 @@ function FormattedLogLine({
   return (
     <div
       className={cn(
-        "group flex items-start gap-2.5 px-3 py-1 font-mono text-[12.5px] leading-relaxed transition-colors border-b border-zinc-900/30",
-        "hover:bg-zinc-900/70",
+        "group flex items-baseline gap-2 px-3 py-0.5 font-mono text-[12px] leading-5 transition-colors",
+        "hover:bg-zinc-900/60",
         level === "error" && "bg-rose-950/20 hover:bg-rose-950/30",
         level === "rate_limit" && "bg-purple-950/20 hover:bg-purple-950/30",
         level === "success" && "bg-emerald-950/10 hover:bg-emerald-950/20",
       )}
     >
-      <span className="w-9 shrink-0 select-none font-mono text-[11px] text-zinc-600 group-hover:text-zinc-400 text-right pr-1">
+      <span className="w-5 shrink-0 select-none font-mono text-[10px] text-zinc-600/80 group-hover:text-zinc-400 text-right">
         {index + 1}
       </span>
 
       {timestamp ? (
-        <span className="shrink-0 select-none font-mono text-[11px] text-zinc-500 group-hover:text-zinc-400">
+        <span className="shrink-0 select-none font-mono text-[10.5px] text-zinc-500 group-hover:text-zinc-400">
           {timestamp}
         </span>
       ) : null}
@@ -247,6 +259,189 @@ function FormattedLogLine({
 
       <div className="min-w-0 flex-1 break-all text-zinc-200">
         {renderContent()}
+      </div>
+    </div>
+  )
+}
+
+function panelStatusMeta(status: ProcessPanelStatus) {
+  switch (status) {
+    case "running":
+      return {
+        label: "执行中",
+        dotClass: "bg-emerald-400 animate-pulse",
+        badgeClass: "border-emerald-500/40 bg-emerald-500/15 text-emerald-300",
+        borderClass: "border-emerald-500/30",
+      }
+    case "retrying":
+      return {
+        label: "等待重试",
+        dotClass: "bg-amber-400 animate-pulse",
+        badgeClass: "border-amber-500/40 bg-amber-500/15 text-amber-300",
+        borderClass: "border-amber-500/30",
+      }
+    case "keepAliveWait":
+      return {
+        label: "保活等待",
+        dotClass: "bg-sky-400 animate-pulse",
+        badgeClass: "border-sky-500/40 bg-sky-500/15 text-sky-300",
+        borderClass: "border-sky-500/30",
+      }
+    case "succeeded":
+      return {
+        label: "已完成",
+        dotClass: "bg-emerald-500",
+        badgeClass: "border-emerald-500/40 bg-emerald-500/15 text-emerald-300",
+        borderClass: "border-emerald-500/35",
+      }
+    case "stopped":
+      return {
+        label: "已停止",
+        dotClass: "bg-amber-500",
+        badgeClass: "border-amber-500/40 bg-amber-500/15 text-amber-300",
+        borderClass: "border-amber-500/30",
+      }
+    case "failed":
+      return {
+        label: "执行失败",
+        dotClass: "bg-rose-500",
+        badgeClass: "border-rose-500/40 bg-rose-500/15 text-rose-300",
+        borderClass: "border-rose-500/35",
+      }
+  }
+}
+
+function ProcessTerminalCard({
+  panel,
+  isMultiWorker,
+  logFilter,
+  onlyErrors,
+  autoScroll,
+  className,
+}: {
+  panel: ProcessPanel
+  isMultiWorker: boolean
+  logFilter: string
+  onlyErrors: boolean
+  autoScroll: boolean
+  className?: string
+}) {
+  const viewportRef = useRef<HTMLDivElement>(null)
+  const meta = panelStatusMeta(panel.status)
+
+  const filteredLines = useMemo(() => {
+    let result = panel.lines
+    if (onlyErrors) {
+      result = result.filter((line) => {
+        const upper = line.toUpperCase()
+        return (
+          upper.includes("ERROR") ||
+          upper.includes("FAIL") ||
+          line.includes("失败") ||
+          line.includes("异常") ||
+          line.includes("高负载") ||
+          upper.includes("429")
+        )
+      })
+    }
+    if (logFilter.trim()) {
+      const keyword = logFilter.toLowerCase()
+      result = result.filter((line) => line.toLowerCase().includes(keyword))
+    }
+    return result
+  }, [panel.lines, logFilter, onlyErrors])
+
+  const rowVirtualizer = useVirtualizer({
+    count: filteredLines.length,
+    getScrollElement: () => viewportRef.current,
+    estimateSize: () => 22,
+    overscan: 20,
+  })
+
+  useEffect(() => {
+    if (!autoScroll || filteredLines.length === 0) return
+
+    rowVirtualizer.scrollToIndex(filteredLines.length - 1, { align: "end" })
+    const timer = setTimeout(() => {
+      if (viewportRef.current) {
+        viewportRef.current.scrollTop = viewportRef.current.scrollHeight
+      }
+    }, 16)
+    return () => clearTimeout(timer)
+  }, [autoScroll, filteredLines.length, rowVirtualizer])
+
+  return (
+    <div
+      className={cn(
+        "flex min-h-0 flex-col overflow-hidden rounded-lg border bg-zinc-950/95 shadow-lg transition-colors",
+        meta.borderClass,
+        className,
+      )}
+    >
+      <div className="flex items-center justify-between gap-2 border-b border-zinc-800/80 bg-zinc-900/75 px-3 py-1.5">
+        <div className="flex min-w-0 items-center gap-2">
+          <span className={cn("h-2 w-2 shrink-0 rounded-full", meta.dotClass)} />
+          {isMultiWorker ? (
+            <span className="shrink-0 rounded bg-zinc-800 px-1.5 py-0.5 font-mono text-[11px] font-semibold text-zinc-200 border border-zinc-700/70">
+              进程 #{panel.workerId}
+            </span>
+          ) : null}
+          <span className="truncate font-mono text-xs font-semibold text-zinc-200">
+            第 {panel.attempt} 次尝试
+          </span>
+          {panel.startedAt ? (
+            <span className="hidden font-mono text-[10.5px] text-zinc-500 sm:inline">
+              启动于 {panel.startedAt}
+            </span>
+          ) : null}
+        </div>
+        <div className="flex shrink-0 items-center gap-2">
+          <span
+            className={cn(
+              "rounded px-1.5 py-0.5 font-mono text-[10px] font-medium border",
+              meta.badgeClass,
+            )}
+          >
+            {meta.label}
+          </span>
+          <span className="font-mono text-[10px] text-zinc-500">
+            {filteredLines.length} 行
+          </span>
+        </div>
+      </div>
+
+      <div className="relative min-h-0 flex-1 bg-zinc-950 py-1">
+        <ScrollArea className="h-full w-full terminal-scrollbar" viewportRef={viewportRef}>
+          {filteredLines.length === 0 ? (
+            <div className="flex h-full min-h-[120px] items-center justify-center p-4 font-mono text-xs text-zinc-600 select-none">
+              {logFilter || onlyErrors ? "当前面板无匹配日志" : "等待进程输出..."}
+            </div>
+          ) : (
+            <div
+              className="relative w-full"
+              style={{ height: `${rowVirtualizer.getTotalSize()}px` }}
+            >
+              {rowVirtualizer.getVirtualItems().map((virtualRow) => {
+                const line = filteredLines[virtualRow.index]
+                return (
+                  <div
+                    key={virtualRow.key}
+                    ref={rowVirtualizer.measureElement}
+                    data-index={virtualRow.index}
+                    className="absolute left-0 top-0 w-full"
+                    style={{ transform: `translateY(${virtualRow.start}px)` }}
+                  >
+                    <FormattedLogLine
+                      line={line}
+                      index={virtualRow.index}
+                      searchTerm={logFilter}
+                    />
+                  </div>
+                )
+              })}
+            </div>
+          )}
+        </ScrollArea>
       </div>
     </div>
   )
@@ -279,6 +474,8 @@ export default function App() {
   const [historyDialogOpen, setHistoryDialogOpen] = useState(false)
   const [logFilter, setLogFilter] = useState("")
   const [onlyErrors, setOnlyErrors] = useState(false)
+  const [selectedWorkerId, setSelectedWorkerId] = useState<number>(1)
+  const [panelLayoutMode, setPanelLayoutMode] = useState<"focus" | "grid">("focus")
   const [serverChanStatus, setServerChanStatus] = useState<ServerChanCredentialStatus>({
     configured: false,
   })
@@ -293,7 +490,9 @@ export default function App() {
   const [emailSmtpPassword, setEmailSmtpPassword] = useState("")
   const [emailAction, setEmailAction] = useState<"loading" | "saving" | "testing" | "deleting">()
   const [emailLastResult, setEmailLastResult] = useState("")
-  const scrollViewportRef = useRef<HTMLDivElement>(null)
+  const [proxyStatus, setProxyStatus] = useState<ProxyCredentialStatus>({ configured: false })
+  const [proxyAction, setProxyAction] = useState<"loading" | "saving" | "deleting">()
+  const [proxyLastResult, setProxyLastResult] = useState("")
 
   const validationErrors = useMemo(() => validateConfig(config), [config])
   const configIsValid = Object.keys(validationErrors).length === 0
@@ -313,33 +512,14 @@ export default function App() {
     isStopping ||
     (!isManualKeepAliveActive && (state.isRunning || !configIsValid))
 
-  const filteredLogs = useMemo(() => {
-    let result = logs
-    if (onlyErrors) {
-      result = result.filter((l) => {
-        const u = l.toUpperCase()
-        return (
-          u.includes("ERROR") ||
-          u.includes("FAIL") ||
-          l.includes("失败") ||
-          l.includes("异常") ||
-          u.includes("429")
-        )
-      })
-    }
-    if (logFilter.trim()) {
-      const keyword = logFilter.toLowerCase()
-      result = result.filter((l) => l.toLowerCase().includes(keyword))
-    }
-    return result
-  }, [logs, logFilter, onlyErrors])
-
-  const logVirtualizer = useVirtualizer({
-    count: filteredLogs.length,
-    getScrollElement: () => scrollViewportRef.current,
-    estimateSize: () => 28,
-    overscan: 20,
-  })
+  const processPanelsView = useMemo(() => buildProcessPanels(logs), [logs])
+  const activePanel = useMemo(() => {
+    if (processPanelsView.panels.length === 0) return undefined
+    return (
+      processPanelsView.panels.find((panel) => panel.workerId === selectedWorkerId) ??
+      processPanelsView.panels[0]
+    )
+  }, [processPanelsView.panels, selectedWorkerId])
 
   useEffect(() => {
     const error = errors[0]
@@ -399,27 +579,22 @@ export default function App() {
   }, [])
 
   useEffect(() => {
-    if (!autoScroll || filteredLogs.length === 0) return
-
-    logVirtualizer.scrollToIndex(filteredLogs.length - 1, { align: "end" })
-
-    const timer1 = setTimeout(() => {
-      if (scrollViewportRef.current) {
-        scrollViewportRef.current.scrollTop = scrollViewportRef.current.scrollHeight
-      }
-    }, 10)
-
-    const timer2 = setTimeout(() => {
-      if (scrollViewportRef.current) {
-        scrollViewportRef.current.scrollTop = scrollViewportRef.current.scrollHeight
-      }
-    }, 60)
-
+    let disposed = false
+    setProxyAction("loading")
+    invoke<ProxyCredentialStatus>("get_proxy_status")
+      .then((status) => {
+        if (!disposed) setProxyStatus(status)
+      })
+      .catch((error: unknown) => {
+        if (!disposed) showActionError("读取代理凭据状态失败", error)
+      })
+      .finally(() => {
+        if (!disposed) setProxyAction(undefined)
+      })
     return () => {
-      clearTimeout(timer1)
-      clearTimeout(timer2)
+      disposed = true
     }
-  }, [autoScroll, filteredLogs.length, logVirtualizer])
+  }, [])
 
   const handleConfigChange = <Key extends keyof AppConfig>(
     key: Key,
@@ -561,6 +736,38 @@ export default function App() {
       showActionError("删除 SMTP 密码失败", error)
     } finally {
       setEmailAction(undefined)
+    }
+  }
+
+  const saveProxy = async () => {
+    setProxyAction("saving")
+    try {
+      const result = await invoke<{ url: string; configured: boolean }>("set_proxy", { config })
+      setProxyStatus({ configured: result.configured })
+      setConfig((current) => ({
+        ...current,
+        proxy: { ...current.proxy, url: result.url },
+      }))
+      setProxyLastResult("代理设置已保存（密码已安全存入 Windows Credential Manager）")
+      toast.success("网络代理设置已保存")
+    } catch (error: unknown) {
+      showActionError("保存代理设置失败", error)
+    } finally {
+      setProxyAction(undefined)
+    }
+  }
+
+  const deleteProxyPassword = async () => {
+    setProxyAction("deleting")
+    try {
+      const status = await invoke<ProxyCredentialStatus>("delete_proxy_password_command")
+      setProxyStatus(status)
+      setProxyLastResult("代理密码已删除")
+      toast.success("代理密码已删除")
+    } catch (error: unknown) {
+      showActionError("删除代理密码失败", error)
+    } finally {
+      setProxyAction(undefined)
     }
   }
 
@@ -904,11 +1111,12 @@ export default function App() {
 
         <AnimatedContent className="w-full" delay={260} distance={12}>
           <Tabs defaultValue="logs" className="w-full">
-          <TabsList className="grid w-full max-w-[520px] grid-cols-4">
+          <TabsList className="grid w-full max-w-[600px] grid-cols-5">
             <TabsTrigger value="config">配置参数</TabsTrigger>
             <TabsTrigger value="logs">实时终端</TabsTrigger>
             <TabsTrigger value="task">计划任务</TabsTrigger>
             <TabsTrigger value="notifications">通知</TabsTrigger>
+            <TabsTrigger value="network">网络</TabsTrigger>
           </TabsList>
 
           <TabsContent value="config" className="mt-4">
@@ -925,7 +1133,7 @@ export default function App() {
                       id="command"
                       value={config.command}
                       onChange={(event) => handleConfigChange("command", event.currentTarget.value)}
-                      placeholder="如: npm run dev"
+                      placeholder='如: codex exec --color never --skip-git-repo-check "分析1+1"'
                       aria-invalid={Boolean(validationErrors.command)}
                     />
                     <FieldError>{validationErrors.command}</FieldError>
@@ -1451,7 +1659,7 @@ export default function App() {
         </TabsContent>
 
           <TabsContent value="logs" className="mt-4">
-            <BorderGlow status={state.status} className="h-[560px]">
+            <BorderGlow status={state.status} className="h-[600px]">
             <Card className="flex h-full flex-col overflow-hidden border-0 bg-zinc-950 shadow-2xl">
               {/* Terminal Header */}
               <div className="flex flex-wrap items-center justify-between gap-3 border-b border-zinc-800/80 bg-zinc-900/70 px-4 py-2.5 backdrop-blur">
@@ -1466,16 +1674,48 @@ export default function App() {
                   <div className="flex items-center gap-2">
                     <FileTerminalIcon className="size-4 text-emerald-400" />
                     <span className="font-mono text-xs font-semibold tracking-wide text-zinc-300">
-                      OUTPUT STREAM
+                      PROCESS TERMINAL
                     </span>
                     <span className="rounded-full bg-zinc-800 px-2 py-0.5 font-mono text-[10px] font-medium text-zinc-400 border border-zinc-700/50">
-                      {filteredLogs.length} / {logs.length} 行
+                      {processPanelsView.panels.length} 个活动进程 · {logs.length} 行
                     </span>
                   </div>
                 </div>
 
                 {/* Right: Controls & Search */}
                 <div className="flex flex-wrap items-center gap-2">
+                  {/* View Mode Switcher (Focus vs Grid) when multiple panels exist */}
+                  {processPanelsView.panels.length > 1 ? (
+                    <div className="flex h-7 items-center rounded-md border border-zinc-700/80 bg-zinc-900/90 p-0.5 font-mono text-[11px]">
+                      <button
+                        type="button"
+                        onClick={() => setPanelLayoutMode("focus")}
+                        className={cn(
+                          "h-full rounded px-2 transition-colors",
+                          panelLayoutMode === "focus"
+                            ? "bg-emerald-500/20 text-emerald-300 font-semibold border border-emerald-500/40"
+                            : "text-zinc-400 hover:text-zinc-200",
+                        )}
+                        title="顶部进程胶囊切换 + 下方全宽独立终端"
+                      >
+                        单页全宽
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setPanelLayoutMode("grid")}
+                        className={cn(
+                          "h-full rounded px-2 transition-colors",
+                          panelLayoutMode === "grid"
+                            ? "bg-emerald-500/20 text-emerald-300 font-semibold border border-emerald-500/40"
+                            : "text-zinc-400 hover:text-zinc-200",
+                        )}
+                        title="同屏多宫格并排分栏"
+                      >
+                        同屏分栏
+                      </button>
+                    </div>
+                  ) : null}
+
                   {/* Log Filter Input */}
                   <div className="relative flex items-center">
                     <SearchIcon className="absolute left-2.5 size-3.5 text-zinc-400" />
@@ -1483,7 +1723,7 @@ export default function App() {
                       type="text"
                       value={logFilter}
                       onChange={(e) => setLogFilter(e.target.value)}
-                      placeholder="检索日志..."
+                      placeholder="检索面板日志..."
                       className="h-7 w-36 rounded-md border border-zinc-700 bg-zinc-900/90 pl-8 pr-7 font-mono text-xs text-zinc-100 placeholder:text-zinc-500 focus:border-emerald-500 focus:outline-none focus:ring-1 focus:ring-emerald-500 sm:w-44"
                     />
                     {logFilter ? (
@@ -1592,42 +1832,171 @@ export default function App() {
                 </div>
               </div>
 
-              {/* Log Viewport Panel */}
-              <CardContent className="relative min-h-0 flex-1 bg-zinc-950 p-0">
-                <GradualBlur position="top" height={18} />
-                <ScrollArea className="h-full w-full terminal-scrollbar" viewportRef={scrollViewportRef}>
-                  {filteredLogs.length === 0 ? (
-                    <div className="flex h-full min-h-[300px] flex-col items-center justify-center gap-2 p-6 font-mono text-xs text-zinc-500 select-none">
-                      <FileTerminalIcon className="size-8 text-zinc-700" />
-                      <span>{logFilter || onlyErrors ? "未找到符合过滤条件的日志输出" : "等待控制台输出日志..."}</span>
-                    </div>
-                  ) : (
-                    <div
-                      className="relative w-full"
-                      style={{ height: `${logVirtualizer.getTotalSize()}px` }}
-                    >
-                      {logVirtualizer.getVirtualItems().map((virtualRow) => {
-                        const line = filteredLogs[virtualRow.index]
-                        return (
-                          <div
-                            key={virtualRow.key}
-                            ref={logVirtualizer.measureElement}
-                            data-index={virtualRow.index}
-                            className="absolute left-0 top-0 w-full"
-                            style={{ transform: `translateY(${virtualRow.start}px)` }}
-                          >
-                            <FormattedLogLine
-                              line={line}
-                              index={virtualRow.index}
-                              searchTerm={logFilter}
-                            />
+              {/* Run Summary Banner */}
+              {processPanelsView.bannerLines.length > 0 ? (
+                <div className="flex flex-wrap items-center gap-x-4 gap-y-1 border-b border-zinc-800/60 bg-zinc-900/35 px-4 py-1 font-mono text-[11px] text-zinc-400">
+                  {processPanelsView.bannerLines.slice(-2).map((bannerLine, idx) => {
+                    const parsed = parseLogLine(bannerLine)
+                    return (
+                      <div key={`${idx}-${bannerLine}`} className="flex min-w-0 items-center gap-1.5">
+                        {parsed.timestamp ? (
+                          <span className="shrink-0 text-zinc-500">{parsed.timestamp}</span>
+                        ) : null}
+                        <span
+                          className={cn(
+                            "truncate",
+                            parsed.level === "success" && "text-emerald-400 font-medium",
+                            parsed.level === "error" && "text-rose-400 font-medium",
+                            parsed.level === "warn" && "text-amber-300",
+                            parsed.level === "info" && "text-zinc-300",
+                          )}
+                        >
+                          {parsed.content}
+                        </span>
+                      </div>
+                    )
+                  })}
+                </div>
+              ) : null}
+
+              {/* Process Status Pills Switcher Bar */}
+              {processPanelsView.panels.length > 0 ? (
+                <div className="grid grid-cols-1 gap-2 border-b border-zinc-800/80 bg-zinc-900/50 px-3 py-2 sm:grid-cols-2 lg:grid-cols-3">
+                  {processPanelsView.panels.map((panel) => {
+                    const meta = panelStatusMeta(panel.status)
+                    const isSelected =
+                      panelLayoutMode === "focus" && activePanel?.workerId === panel.workerId
+                    const isSummaryError =
+                      panel.lastSummary.toUpperCase().includes("RECONNECTING") ||
+                      panel.lastSummary.toUpperCase().includes("FAIL") ||
+                      panel.lastSummary.includes("失败") ||
+                      panel.lastSummary.includes("高负载")
+
+                    return (
+                      <button
+                        key={panel.id}
+                        type="button"
+                        onClick={() => {
+                          setSelectedWorkerId(panel.workerId)
+                          if (panelLayoutMode !== "focus") {
+                            setPanelLayoutMode("focus")
+                          }
+                        }}
+                        className={cn(
+                          "group flex flex-col gap-1 rounded-md border px-3 py-2 text-left transition-all select-none",
+                          isSelected
+                            ? "border-emerald-500/60 bg-emerald-950/20 shadow-[0_0_16px_rgba(16,185,129,0.12)]"
+                            : "border-zinc-800/90 bg-zinc-900/60 hover:border-zinc-700 hover:bg-zinc-900",
+                        )}
+                      >
+                        <div className="flex items-center justify-between gap-2">
+                          <div className="flex min-w-0 items-center gap-2">
+                            <span className={cn("h-2 w-2 shrink-0 rounded-full", meta.dotClass)} />
+                            <span
+                              className={cn(
+                                "shrink-0 rounded px-1.5 py-0.5 font-mono text-[11px] font-semibold border",
+                                isSelected
+                                  ? "border-emerald-500/40 bg-emerald-500/15 text-emerald-200"
+                                  : "border-zinc-700/70 bg-zinc-800 text-zinc-200",
+                              )}
+                            >
+                              进程 #{panel.workerId}
+                            </span>
+                            <span className="truncate font-mono text-xs font-semibold text-zinc-100">
+                              第 {panel.attempt} 次尝试
+                            </span>
                           </div>
-                        )
-                      })}
-                    </div>
-                  )}
-                </ScrollArea>
-                <GradualBlur position="bottom" height={28} />
+                          <div className="flex shrink-0 items-center gap-1.5">
+                            <span
+                              className={cn(
+                                "rounded px-1.5 py-0.5 font-mono text-[10px] font-medium border",
+                                meta.badgeClass,
+                              )}
+                            >
+                              {meta.label}
+                            </span>
+                            <span className="font-mono text-[10px] text-zinc-500">
+                              {panel.lines.length}行
+                            </span>
+                          </div>
+                        </div>
+                        <div className="flex items-center justify-between gap-2 pl-4">
+                          <span
+                            className={cn(
+                              "truncate font-mono text-[11px]",
+                              isSummaryError ? "text-rose-300/90" : "text-zinc-400",
+                            )}
+                          >
+                            {panel.lastSummary}
+                          </span>
+                          {panel.startedAt ? (
+                            <span className="shrink-0 font-mono text-[10px] text-zinc-600">
+                              {panel.startedAt}
+                            </span>
+                          ) : null}
+                        </div>
+                      </button>
+                    )
+                  })}
+                </div>
+              ) : null}
+
+              {/* Terminal Viewport: Full-Width Focus Mode or Hole-Free Grid Mode */}
+              <CardContent className="relative min-h-0 flex-1 bg-zinc-950 p-2.5">
+                {processPanelsView.panels.length === 0 ? (
+                  <div className="flex h-full min-h-[300px] flex-col items-center justify-center gap-2 rounded-lg border border-dashed border-zinc-800/80 p-6 font-mono text-xs text-zinc-500 select-none">
+                    <FileTerminalIcon className="size-8 text-zinc-700" />
+                    <span>等待任务启动并创建独立进程面板...</span>
+                    <span className="text-[11px] text-zinc-600">
+                      顶部胶囊实时追踪各并发进程进展，上一轮尝试结束将自动替换为新面板
+                    </span>
+                  </div>
+                ) : panelLayoutMode === "focus" || processPanelsView.panels.length === 1 ? (
+                  activePanel ? (
+                    <ProcessTerminalCard
+                      key={activePanel.id}
+                      panel={activePanel}
+                      isMultiWorker={
+                        processPanelsView.isMultiWorker || processPanelsView.panels.length > 1
+                      }
+                      logFilter={logFilter}
+                      onlyErrors={onlyErrors}
+                      autoScroll={autoScroll}
+                      className="h-full w-full"
+                    />
+                  ) : null
+                ) : (
+                  <div
+                    className={cn(
+                      "grid h-full w-full gap-2.5",
+                      processPanelsView.panels.length === 2 &&
+                        "grid-cols-1 grid-rows-2 lg:grid-cols-2 lg:grid-rows-1",
+                      processPanelsView.panels.length >= 3 &&
+                        processPanelsView.panels.length <= 4 &&
+                        "grid-cols-1 md:grid-cols-2 md:grid-rows-2",
+                      processPanelsView.panels.length > 4 &&
+                        "grid-cols-1 md:grid-cols-2 xl:grid-cols-3 auto-rows-[minmax(200px,1fr)] overflow-y-auto pr-1",
+                    )}
+                  >
+                    {processPanelsView.panels.map((panel, idx) => (
+                      <ProcessTerminalCard
+                        key={panel.id}
+                        panel={panel}
+                        isMultiWorker={
+                          processPanelsView.isMultiWorker || processPanelsView.panels.length > 1
+                        }
+                        logFilter={logFilter}
+                        onlyErrors={onlyErrors}
+                        autoScroll={autoScroll}
+                        className={cn(
+                          processPanelsView.panels.length === 3 &&
+                            idx === 2 &&
+                            "md:col-span-2",
+                        )}
+                      />
+                    ))}
+                  </div>
+                )}
               </CardContent>
             </Card>
             </BorderGlow>
@@ -1688,6 +2057,139 @@ export default function App() {
                 onRefresh={() => void checkTask()}
               />
             </div>
+          </TabsContent>
+
+          <TabsContent value="network" className="mt-4">
+            <Card>
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2">
+                  <NetworkIcon className="size-4" />
+                  网络代理
+                </CardTitle>
+                <CardDescription>
+                  为启动的命令子进程注入 HTTP/HTTPS/ALL_PROXY 环境变量，并让 Server酱通知走配置的代理。
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="flex flex-col gap-6">
+                <div className="flex flex-col gap-4 rounded-lg border bg-muted/50 p-4 sm:flex-row sm:items-center sm:justify-between">
+                  <div className="flex min-w-0 flex-col gap-1">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <p className="font-medium">代理状态</p>
+                      <Badge variant={proxyStatus.configured ? "default" : "outline"}>
+                        {proxyStatus.configured ? "密码已配置" : "无密码 / 未配置"}
+                      </Badge>
+                      <Badge variant={config.proxy.enabled ? "default" : "outline"}>
+                        {config.proxy.enabled ? "已启用" : "已关闭"}
+                      </Badge>
+                    </div>
+                    <p className="text-xs text-muted-foreground">
+                      代理密码从 URL 中自动抽离，单独存入 Windows Credential Manager，不写入配置文件。
+                    </p>
+                  </div>
+                  <div className="flex shrink-0 items-center gap-2">
+                    <Switch
+                      id="proxyEnabled"
+                      checked={config.proxy.enabled}
+                      onCheckedChange={(checked) =>
+                        setConfig((current) => ({
+                          ...current,
+                          proxy: { ...current.proxy, enabled: checked },
+                        }))
+                      }
+                    />
+                    <label htmlFor="proxyEnabled" className="cursor-pointer text-sm font-medium">
+                      启用代理
+                    </label>
+                  </div>
+                </div>
+
+                <Field data-invalid={Boolean(validationErrors.proxy)}>
+                  <FieldLabel htmlFor="proxyUrl">代理 URL</FieldLabel>
+                  <Input
+                    id="proxyUrl"
+                    type="text"
+                    autoComplete="off"
+                    value={config.proxy.url}
+                    onChange={(event) => {
+                      const url = event.currentTarget.value
+                      setConfig((current) => ({
+                        ...current,
+                        proxy: { ...current.proxy, url },
+                      }))
+                    }}
+                    placeholder="http://user:pass@127.0.0.1:7890 或 socks5://127.0.0.1:1080"
+                    disabled={Boolean(proxyAction)}
+                  />
+                  <FieldError>{validationErrors.proxy}</FieldError>
+                </Field>
+
+                <div className="rounded-lg border bg-muted/30 p-4">
+                  <p className="text-sm font-medium">作用范围与限制</p>
+                  <ul className="mt-1 list-inside list-disc space-y-1 text-xs leading-5 text-muted-foreground">
+                    <li>启用后，启动的重试命令（如 codex）会继承 HTTP_PROXY/HTTPS_PROXY/ALL_PROXY 环境变量。</li>
+                    <li>Server酱个人微信通知会通过配置的代理发送。</li>
+                    <li>邮件 SMTP 通知暂不支持代理，保持系统默认行为。</li>
+                    <li>运行中修改代理对已启动的子进程不生效，下次启动后生效。</li>
+                  </ul>
+                </div>
+
+                <div className="flex flex-col gap-3 border-t pt-4 sm:flex-row sm:items-center sm:justify-between">
+                  <div className="min-h-5 min-w-0 text-xs text-muted-foreground">
+                    {proxyLastResult || "保存后代理立即生效，下次启动命令时应用"}
+                  </div>
+                  <div className="flex shrink-0 flex-wrap gap-2">
+                    <Button
+                      onClick={() => void saveProxy()}
+                      disabled={Boolean(proxyAction) || !configIsValid}
+                    >
+                      {proxyAction === "saving" ? (
+                        <Spinner data-icon="inline-start" />
+                      ) : (
+                        <SendIcon data-icon="inline-start" />
+                      )}
+                      保存代理设置
+                    </Button>
+                    <AlertDialog>
+                      <AlertDialogTrigger
+                        render={
+                          <Button
+                            variant="destructive"
+                            disabled={Boolean(proxyAction) || !proxyStatus.configured}
+                          />
+                        }
+                      >
+                        {proxyAction === "deleting" ? (
+                          <Spinner data-icon="inline-start" />
+                        ) : (
+                          <Trash2Icon data-icon="inline-start" />
+                        )}
+                        删除代理密码
+                      </AlertDialogTrigger>
+                      <AlertDialogContent>
+                        <AlertDialogHeader>
+                          <AlertDialogMedia>
+                            <KeyRoundIcon />
+                          </AlertDialogMedia>
+                          <AlertDialogTitle>删除代理密码？</AlertDialogTitle>
+                          <AlertDialogDescription>
+                            删除后代理 URL 仍会保留，但包含密码的代理将无法拼回完整地址，请重新填写带密码的 URL 并保存。
+                          </AlertDialogDescription>
+                        </AlertDialogHeader>
+                        <AlertDialogFooter>
+                          <AlertDialogCancel>取消</AlertDialogCancel>
+                          <AlertDialogAction
+                            variant="destructive"
+                            onClick={() => void deleteProxyPassword()}
+                          >
+                            删除密码
+                          </AlertDialogAction>
+                        </AlertDialogFooter>
+                      </AlertDialogContent>
+                    </AlertDialog>
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
           </TabsContent>
           </Tabs>
         </AnimatedContent>

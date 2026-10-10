@@ -240,7 +240,7 @@ impl DesktopNotificationTransport for DisabledDesktopNotificationTransport {
 pub struct NotificationService {
     paths: AppPaths,
     credentials: Arc<dyn CredentialStore>,
-    client: Arc<ServerChanClient>,
+    client: Arc<std::sync::Mutex<Arc<ServerChanClient>>>,
     desktop: Arc<dyn DesktopNotificationTransport>,
 }
 
@@ -249,11 +249,14 @@ impl NotificationService {
         paths: AppPaths,
         credentials: Arc<dyn CredentialStore>,
         app_identifier: String,
+        proxy_url: Option<String>,
     ) -> Self {
         Self {
             paths,
             credentials,
-            client: Arc::new(ServerChanClient::production()),
+            client: Arc::new(std::sync::Mutex::new(Arc::new(
+                ServerChanClient::production(proxy_url),
+            ))),
             desktop: Arc::new(NativeDesktopNotificationTransport::new(app_identifier)),
         }
     }
@@ -262,12 +265,12 @@ impl NotificationService {
     pub(crate) fn with_client(
         paths: AppPaths,
         credentials: Arc<dyn CredentialStore>,
-        client: Arc<ServerChanClient>,
+        client: ServerChanClient,
     ) -> Self {
         Self {
             paths,
             credentials,
-            client,
+            client: Arc::new(std::sync::Mutex::new(Arc::new(client))),
             desktop: Arc::new(DisabledDesktopNotificationTransport),
         }
     }
@@ -276,15 +279,28 @@ impl NotificationService {
     fn with_transports(
         paths: AppPaths,
         credentials: Arc<dyn CredentialStore>,
-        client: Arc<ServerChanClient>,
+        client: ServerChanClient,
         desktop: Arc<dyn DesktopNotificationTransport>,
     ) -> Self {
         Self {
             paths,
             credentials,
-            client,
+            client: Arc::new(std::sync::Mutex::new(Arc::new(client))),
             desktop,
         }
+    }
+
+    /// 在运行时热更新 Server酱代理（保存代理配置后调用）。
+    pub fn update_proxy(&self, proxy_url: Option<String>) {
+        let mut guard = self.client.lock().expect("notification client mutex");
+        *guard = Arc::new(ServerChanClient::production(proxy_url));
+    }
+
+    fn current_client(&self) -> Arc<ServerChanClient> {
+        self.client
+            .lock()
+            .expect("notification client mutex")
+            .clone()
     }
 
     pub fn run_sink(
@@ -298,7 +314,7 @@ impl NotificationService {
                 settings: server_chan_settings,
                 paths: self.paths.clone(),
                 credentials: self.credentials.clone(),
-                client: self.client.clone(),
+                client: self.current_client(),
             },
             desktop: DesktopRunSink {
                 settings: desktop_settings,
@@ -342,7 +358,8 @@ impl NotificationService {
         let send_key = read_send_key(self.credentials.clone())
             .await?
             .ok_or_else(|| "尚未配置 Server酱 SendKey".to_string())?;
-        match deliver_event(&self.client, &send_key, &event).await {
+        let client = self.current_client();
+        match deliver_event(&client, &send_key, &event).await {
             Ok(receipt) => {
                 record_server_chan_delivery(&self.paths, &event, &Ok(receipt.clone()));
                 Ok(format!(
@@ -823,7 +840,7 @@ mod tests {
         let transport = Arc::new(RecordingTransport {
             calls: Mutex::new(Vec::new()),
         });
-        let client = Arc::new(ServerChanClient::with_transport(transport.clone()));
+        let client = ServerChanClient::with_transport(transport.clone());
         let service = NotificationService::with_client(paths, credentials, client);
         let settings = ServerChanConfig { enabled: true };
         let sink = service.run_sink(
@@ -870,7 +887,7 @@ mod tests {
         let transport = Arc::new(RecordingTransport {
             calls: Mutex::new(Vec::new()),
         });
-        let client = Arc::new(ServerChanClient::with_transport(transport));
+        let client = ServerChanClient::with_transport(transport);
         let service = NotificationService::with_client(
             paths.clone(),
             Arc::new(MemoryCredentialStore::default()),
@@ -901,7 +918,7 @@ mod tests {
         let server_transport = Arc::new(RecordingTransport {
             calls: Mutex::new(Vec::new()),
         });
-        let client = Arc::new(ServerChanClient::with_transport(server_transport.clone()));
+        let client = ServerChanClient::with_transport(server_transport.clone());
         let desktop_transport = Arc::new(RecordingDesktopTransport {
             calls: Mutex::new(Vec::new()),
         });
@@ -965,7 +982,7 @@ mod tests {
         let service = NotificationService::with_transports(
             paths,
             Arc::new(MemoryCredentialStore::default()),
-            Arc::new(ServerChanClient::with_transport(server_transport)),
+            ServerChanClient::with_transport(server_transport),
             desktop_transport.clone(),
         );
         let event = NotificationEvent::from_terminal(&retry_success_status(temp.path(), 1));

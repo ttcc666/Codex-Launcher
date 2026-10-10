@@ -39,6 +39,7 @@ export interface AppConfig {
   desktopNotification: DesktopNotificationConfig
   serverChan: ServerChanConfig
   email: EmailNotificationConfig
+  proxy: ProxyConfig
 }
 
 export type Weekday =
@@ -96,11 +97,25 @@ export interface EmailNotificationConfig {
   toAddress: string
 }
 
+export interface ProxyConfig {
+  enabled: boolean
+  url: string
+}
+
 export interface ServerChanCredentialStatus {
   configured: boolean
 }
 
 export interface EmailCredentialStatus {
+  configured: boolean
+}
+
+export interface ProxyCredentialStatus {
+  configured: boolean
+}
+
+export interface SetProxyResult {
+  url: string
   configured: boolean
 }
 
@@ -209,6 +224,10 @@ const initialConfig: AppConfig = {
     smtpPort: 465,
     smtpUsername: "",
     toAddress: "",
+  },
+  proxy: {
+    enabled: false,
+    url: "",
   },
 }
 

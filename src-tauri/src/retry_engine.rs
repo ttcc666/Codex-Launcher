@@ -3,6 +3,7 @@ use crate::config_manager::{
     get_codex_base_url, is_base_url_allowed, MAX_CONCURRENCY, MAX_INTERVAL_SECONDS, MAX_TRIES_LIMIT,
 };
 use crate::notifications::{NoopNotificationSink, NotificationEvent, NotificationSink};
+use crate::proxy::build_proxy_env_vars;
 use crate::run_manager::{
     is_stop_requested, keep_alive_override, MaintenanceLease, RunLease, RunManager,
 };
@@ -34,12 +35,17 @@ const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 const HIGH_DEMAND_MSG: &str =
     "We're currently experiencing high demand, which may cause temporary errors.";
+const HIGH_DEMAND_CURLY_MSG: &str =
+    "We\u{2019}re currently experiencing high demand, which may cause temporary errors.";
+const HIGH_DEMAND_MARKERS: &[&[u8]] =
+    &[HIGH_DEMAND_MSG.as_bytes(), HIGH_DEMAND_CURLY_MSG.as_bytes()];
 const OUTPUT_CHUNK_BYTES: usize = 8 * 1024;
 const OUTPUT_CHANNEL_CAPACITY: usize = 32;
 const OUTPUT_TAIL_MAX_BYTES: usize = 64 * 1024;
 const OUTPUT_TAIL_MAX_CHUNKS: usize = 512;
 const LOG_FLUSH_BYTES: usize = 32 * 1024;
 const REMOTE_STOP_POLL_MS: u64 = 250;
+const POST_EXIT_DRAIN_TIMEOUT: Duration = Duration::from_millis(250);
 const LOG_NOTICE_INTERVAL: Duration = Duration::from_millis(100);
 const CONTINUATION_MARKER: &str = " … [logical line continues]";
 pub(crate) const MAX_LOGICAL_LINE_BYTES: usize = 256 * 1024;
@@ -140,6 +146,7 @@ pub struct RunOptions {
     pub keep_alive_interval: Duration,
     pub run_mode: RunMode,
     pub launch_source: LaunchSource,
+    pub proxy: Option<String>,
     notification_sink: Arc<dyn NotificationSink>,
     shell_program: OsString,
 }
@@ -163,6 +170,7 @@ impl RunOptions {
             keep_alive_interval: Duration::from_secs(300),
             run_mode: RunMode::Retry,
             launch_source: LaunchSource::Gui,
+            proxy: None,
             notification_sink: Arc::new(NoopNotificationSink),
             shell_program: std::env::var_os("ComSpec").unwrap_or_else(|| OsString::from("cmd.exe")),
         }
@@ -186,6 +194,11 @@ impl RunOptions {
 
     pub fn with_launch_source(mut self, launch_source: LaunchSource) -> Self {
         self.launch_source = launch_source;
+        self
+    }
+
+    pub fn with_proxy(mut self, proxy: Option<String>) -> Self {
+        self.proxy = proxy;
         self
     }
 
@@ -1000,6 +1013,8 @@ async fn run_child(
     remote_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut stdout_done = false;
     let mut stderr_done = false;
+    let mut exit_status: Option<std::process::ExitStatus> = None;
+    let mut drain_deadline: Option<tokio::time::Instant> = None;
     let mut capture = AttemptCapture::default();
 
     while !(stdout_done && stderr_done) {
@@ -1023,6 +1038,39 @@ async fn run_child(
                         return Err(LoopOutcome::Failed(error));
                     }
                 }
+            }
+            wait_result = child.wait(), if exit_status.is_none() => {
+                let status = wait_result.map_err(|error| {
+                    LoopOutcome::Failed(format!("等待子进程组退出失败: {}", error))
+                })?;
+                exit_status = Some(status);
+                drain_deadline = Some(tokio::time::Instant::now() + POST_EXIT_DRAIN_TIMEOUT);
+            }
+            _ = async {
+                if let Some(deadline) = drain_deadline {
+                    tokio::time::sleep_until(deadline).await;
+                }
+            }, if drain_deadline.is_some() => {
+                let _ = child.kill().await;
+                if !stdout_done {
+                    match worker.finish_output(StreamSource::Stdout).await {
+                        Ok(fragments) => capture.push_normalized(&fragments),
+                        Err(error) => {
+                            worker.set_child_pid(None).map_err(LoopOutcome::Failed)?;
+                            return Err(LoopOutcome::Failed(error));
+                        }
+                    }
+                }
+                if !stderr_done {
+                    match worker.finish_output(StreamSource::Stderr).await {
+                        Ok(fragments) => capture.push_normalized(&fragments),
+                        Err(error) => {
+                            worker.set_child_pid(None).map_err(LoopOutcome::Failed)?;
+                            return Err(LoopOutcome::Failed(error));
+                        }
+                    }
+                }
+                break;
             }
             event = receiver.recv() => {
                 match event {
@@ -1071,10 +1119,14 @@ async fn run_child(
         }
     }
 
-    let status = child
-        .wait()
-        .await
-        .map_err(|error| LoopOutcome::Failed(format!("等待子进程组退出失败: {}", error)))?;
+    let status = match exit_status {
+        Some(status) => status,
+        None => child
+            .wait()
+            .await
+            .map_err(|error| LoopOutcome::Failed(format!("等待子进程组退出失败: {}", error)))?,
+    };
+    let _ = child.kill().await;
     Ok(AttemptResult {
         exit_code: status.code(),
         high_demand: capture.high_demand,
@@ -1192,6 +1244,12 @@ fn spawn_child(options: &RunOptions) -> Result<AsyncGroupChild, String> {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+
+    if let Some(proxy) = &options.proxy {
+        for (key, value) in build_proxy_env_vars(proxy) {
+            command.env(key, value);
+        }
+    }
 
     let mut group = command.group();
     group.kill_on_drop(true);
@@ -1486,15 +1544,21 @@ impl ByteMarkerScanner {
             return;
         }
 
-        let marker = HIGH_DEMAND_MSG.as_bytes();
         let mut window = Vec::with_capacity(self.suffix.len() + bytes.len());
         window.extend_from_slice(&self.suffix);
         window.extend_from_slice(bytes);
-        self.found = window
-            .windows(marker.len())
-            .any(|candidate| candidate == marker);
+        self.found = HIGH_DEMAND_MARKERS.iter().any(|marker| {
+            window
+                .windows(marker.len())
+                .any(|candidate| candidate == *marker)
+        });
 
-        let keep = marker.len().saturating_sub(1).min(window.len());
+        let max_marker_len = HIGH_DEMAND_MARKERS
+            .iter()
+            .map(|marker| marker.len())
+            .max()
+            .unwrap_or(0);
+        let keep = max_marker_len.saturating_sub(1).min(window.len());
         self.suffix.clear();
         self.suffix
             .extend_from_slice(&window[window.len().saturating_sub(keep)..]);
@@ -1605,7 +1669,8 @@ impl LogSink {
             self.worker_prefix(worker_id),
             message
         );
-        self.write_record(line.as_bytes()).await
+        self.write_record(line.as_bytes()).await?;
+        self.flush_and_notify().await
     }
 
     async fn write_output(
@@ -1642,6 +1707,9 @@ impl LogSink {
         source: StreamSource,
         framed: Vec<FramedLine>,
     ) -> Result<Vec<NormalizedFragment>, String> {
+        if framed.is_empty() {
+            return Ok(Vec::new());
+        }
         let mut normalized = Vec::with_capacity(framed.len());
         for line in framed {
             let text = decode_output_text(&line.bytes);
@@ -1664,6 +1732,7 @@ impl LogSink {
                 continuation: line.continuation,
             });
         }
+        self.flush_and_notify().await?;
         Ok(normalized)
     }
 
@@ -1677,6 +1746,14 @@ impl LogSink {
             .await
             .map_err(|error| format!("写入 latest log 失败: {}", error))?;
         self.pending_bytes += bytes.len();
+        if self.pending_bytes >= LOG_FLUSH_BYTES {
+            self.flush().await?;
+        }
+        Ok(())
+    }
+
+    async fn flush_and_notify(&mut self) -> Result<(), String> {
+        self.flush().await?;
         if let Some(app) = &self.app {
             if self
                 .notice_throttle
@@ -1689,9 +1766,6 @@ impl LogSink {
                     },
                 );
             }
-        }
-        if self.pending_bytes >= LOG_FLUSH_BYTES {
-            self.flush().await?;
         }
         Ok(())
     }
@@ -2502,6 +2576,62 @@ mod tests {
         assert!(!scanner.found);
         scanner.push(&HIGH_DEMAND_MSG.as_bytes()[split..]);
         assert!(scanner.found);
+    }
+
+    #[test]
+    fn curly_apostrophe_high_demand_marker_is_detected_across_raw_chunk_boundaries() {
+        let mut scanner = ByteMarkerScanner::default();
+        let split = 4; // 切在 UTF-8 弯单引号 "We’re" 内部或附近
+        scanner.push(&HIGH_DEMAND_CURLY_MSG.as_bytes()[..split]);
+        assert!(!scanner.found);
+        scanner.push(&HIGH_DEMAND_CURLY_MSG.as_bytes()[split..]);
+        assert!(scanner.found);
+    }
+
+    #[tokio::test]
+    async fn log_sink_flushes_complete_lines_immediately_without_waiting_for_32kb() {
+        let temp = tempfile::tempdir().expect("create temp dir");
+        let full_path = temp.path().join("full.log");
+        let latest_path = temp.path().join("latest.log");
+        let mut sink = LogSink::open("run-a", &full_path, &latest_path, None, false)
+            .await
+            .expect("open log sink");
+
+        let _ = sink
+            .write_output(FIRST_WORKER_ID, StreamSource::Stdout, b"realtime-line\n")
+            .await
+            .expect("write single line");
+
+        let latest = fs::read_to_string(&latest_path).expect("read latest log immediately");
+        let full = fs::read_to_string(&full_path).expect("read full log immediately");
+        assert!(latest.contains("realtime-line"), "{latest}");
+        assert!(full.contains("realtime-line"), "{full}");
+    }
+
+    #[tokio::test]
+    async fn lingering_grandchild_holding_stdio_pipes_does_not_block_attempt_completion() {
+        let temp = tempfile::tempdir().expect("create temp dir");
+        let paths = AppPaths::from_root(temp.path().join("app-data"));
+        // start /b 派生的后台孙进程继承 stdout/stderr 管道写句柄并挂起 30 秒，主进程立即退出。
+        let command = "echo main-output & start /b ping -n 30 127.0.0.1 & exit /b 1";
+        let started = start_run(
+            None,
+            Arc::new(RunManager::new()),
+            paths,
+            options(temp.path(), command, 1),
+        )
+        .await
+        .expect("start command with lingering grandchild");
+
+        let status = tokio::time::timeout(Duration::from_secs(5), started.wait())
+            .await
+            .expect("主进程退出后不应被持有管道的残留孙进程无限阻塞")
+            .expect("wait for terminal status");
+
+        assert_eq!(status.status, RunStatus::Failed);
+        assert_eq!(status.last_exit_code, Some(1));
+        let log = fs::read_to_string(&status.log_file).expect("read run log");
+        assert!(log.contains("main-output"), "{log}");
     }
 
     #[test]

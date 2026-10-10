@@ -75,6 +75,10 @@ export function validateConfig(config: AppConfig): ConfigValidationErrors {
     .find((value) => !isHttpUrl(value))
   if (invalidUrl) errors.allowedBaseUrls = `无效的 http/https URL：${invalidUrl}`
 
+  if (config.proxy.enabled && !isProxyUrl(config.proxy.url)) {
+    errors.proxy = "代理 URL 必须是 http/https/socks5 协议且包含 host"
+  }
+
   return errors
 }
 
@@ -252,6 +256,19 @@ function isHttpUrl(value: string): boolean {
       Boolean(url.hostname) &&
       !url.username &&
       !url.password
+    )
+  } catch {
+    return false
+  }
+}
+
+function isProxyUrl(value: string): boolean {
+  try {
+    const url = new URL(value.trim())
+    const scheme = url.protocol.replace(":", "")
+    return (
+      ["http", "https", "socks5", "socks5h"].includes(scheme) &&
+      Boolean(url.hostname)
     )
   } catch {
     return false

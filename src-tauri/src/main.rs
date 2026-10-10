@@ -8,6 +8,7 @@ mod config_manager;
 mod credential_store;
 mod email_notifier;
 mod notifications;
+mod proxy;
 mod retry_engine;
 mod run_manager;
 mod schedule;
@@ -24,6 +25,10 @@ use email_notifier::{
     delete_email_password, get_email_password, set_email_password, EmailCredentialStatus,
 };
 use notifications::{NotificationService, ServerChanCredentialStatus};
+use proxy::{
+    delete_proxy_password, extract_proxy_password, get_proxy_password, set_proxy_password,
+    ProxyCredentialStatus, SetProxyResult,
+};
 use retry_engine::{
     clear_history_logs, start_run, LaunchSource, RunMode, RunOptions, RunStatus, TaskStatus,
 };
@@ -56,7 +61,14 @@ async fn get_config(state: State<'_, AppState>) -> Result<AppConfig, String> {
 
 #[tauri::command]
 async fn save_app_config(config: AppConfig, state: State<'_, AppState>) -> Result<(), String> {
-    save_config_file(&state.paths, &config).await
+    save_config_file(&state.paths, &config).await?;
+    let full_url = if config.proxy.enabled {
+        proxy::resolve_full_proxy_url(&config.proxy.url).unwrap_or(None)
+    } else {
+        None
+    };
+    state.notification_service.update_proxy(full_url);
+    Ok(())
 }
 
 #[tauri::command]
@@ -135,6 +147,61 @@ async fn test_email_notification(
         .notification_service
         .test_email_notification(config.email)
         .await
+}
+
+// ── 网络代理命令 ──────────────────────────────────────────────────────────────
+
+#[tauri::command]
+async fn get_proxy_status() -> Result<ProxyCredentialStatus, String> {
+    tokio::task::spawn_blocking(|| {
+        let configured = get_proxy_password()?.is_some();
+        Ok(ProxyCredentialStatus { configured })
+    })
+    .await
+    .map_err(|_| "读取代理凭据状态 blocking task 失败".to_string())?
+}
+
+#[tauri::command]
+async fn set_proxy(
+    mut config: AppConfig,
+    state: State<'_, AppState>,
+) -> Result<SetProxyResult, String> {
+    config.validate()?;
+    let password = if config.proxy.enabled {
+        extract_proxy_password(&mut config.proxy.url)?
+    } else {
+        None
+    };
+    if let Some(password) = password {
+        tokio::task::spawn_blocking(move || set_proxy_password(&password))
+            .await
+            .map_err(|_| "保存代理密码 blocking task 失败".to_string())??;
+    }
+    save_config_file(&state.paths, &config).await?;
+    let full_url = if config.proxy.enabled {
+        proxy::resolve_full_proxy_url(&config.proxy.url)?
+    } else {
+        None
+    };
+    state.notification_service.update_proxy(full_url);
+    let configured = get_proxy_password()
+        .map(|opt| opt.is_some())
+        .unwrap_or(false);
+    Ok(SetProxyResult {
+        url: config.proxy.url,
+        configured,
+    })
+}
+
+#[tauri::command]
+async fn delete_proxy_password_command(
+    state: State<'_, AppState>,
+) -> Result<ProxyCredentialStatus, String> {
+    tokio::task::spawn_blocking(delete_proxy_password)
+        .await
+        .map_err(|_| "删除代理密码 blocking task 失败".to_string())??;
+    state.notification_service.update_proxy(None);
+    Ok(ProxyCredentialStatus { configured: false })
 }
 
 #[tauri::command]
@@ -333,6 +400,11 @@ fn run_options_from_config(
         config.desktop_notification.clone(),
         config.email.clone(),
     );
+    let proxy = if config.proxy.enabled {
+        proxy::resolve_full_proxy_url(&config.proxy.url).unwrap_or(None)
+    } else {
+        None
+    };
     RunOptions::new(
         config.command,
         PathBuf::from(config.work_dir),
@@ -346,6 +418,19 @@ fn run_options_from_config(
         Duration::from_secs(config.keep_alive_interval_minutes * 60),
     )
     .with_notification_sink(notification_sink)
+    .with_proxy(proxy)
+}
+
+/// 启动时容错读取已保存的代理配置，解析完整代理 URL（含凭据库密码）。
+/// 配置缺失、损坏或未启用代理时返回 `None`，绝不阻塞启动。
+fn preload_proxy_url(paths: &AppPaths) -> Option<String> {
+    let config = read_json::<AppConfig>(&paths.config_file).ok()?;
+    if !config.proxy.enabled {
+        return None;
+    }
+    proxy::resolve_full_proxy_url(&config.proxy.url)
+        .ok()
+        .flatten()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -508,6 +593,24 @@ async fn run_uninstall_cleanup(
             false
         }
     };
+    // 邮件 SMTP 密码与代理密码采用相同模式幂等清理，失败不阻断卸载。
+    for label in ["邮件 SMTP 密码", "代理密码"] {
+        let cleanup = if label == "邮件 SMTP 密码" {
+            email_notifier::delete_email_password
+        } else {
+            proxy::delete_proxy_password
+        };
+        match tokio::task::spawn_blocking(cleanup).await {
+            Ok(Ok(_)) => {}
+            Ok(Err(error)) => {
+                record_uninstall_warning(paths, &format!("卸载时删除{label}失败: {error}"))
+            }
+            Err(error) => record_uninstall_warning(
+                paths,
+                &format!("卸载时删除{label} blocking task 失败: {error}"),
+            ),
+        }
+    }
     let fallback_task_name = if paths.config_file.exists() {
         match read_json::<serde_json::Value>(&paths.config_file) {
             Ok(value) => value
@@ -646,10 +749,12 @@ async fn main() -> ExitCode {
     let tauri_context = tauri::generate_context!();
     let app_identifier = tauri_context.config().identifier.clone();
     let run_manager = Arc::new(RunManager::new());
+    let startup_proxy_url = preload_proxy_url(&paths);
     let notification_service = Arc::new(NotificationService::production(
         paths.clone(),
         credential_store,
         app_identifier,
+        startup_proxy_url,
     ));
 
     if let Err(error) = reconcile_stale_status(&paths, None) {
@@ -701,6 +806,9 @@ async fn main() -> ExitCode {
             set_email_smtp_password,
             delete_email_smtp_password,
             test_email_notification,
+            get_proxy_status,
+            set_proxy,
+            delete_proxy_password_command,
             start_retry,
             start_manual_keep_alive,
             stop_retry,

@@ -1,4 +1,5 @@
 use crate::app_storage::{atomic_write_bytes, atomic_write_json, AppPaths};
+use crate::proxy::validate_proxy_url;
 use crate::schedule::ScheduleConfig;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -47,6 +48,13 @@ impl EmailNotificationConfig {
     }
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default, rename_all = "camelCase")]
+pub struct ProxyConfig {
+    pub enabled: bool,
+    pub url: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default, rename_all = "camelCase")]
 pub struct AppConfig {
@@ -64,6 +72,7 @@ pub struct AppConfig {
     pub desktop_notification: DesktopNotificationConfig,
     pub server_chan: ServerChanConfig,
     pub email: EmailNotificationConfig,
+    pub proxy: ProxyConfig,
 }
 
 impl Default for AppConfig {
@@ -86,6 +95,7 @@ impl Default for AppConfig {
                 smtp_port: EmailNotificationConfig::default_port(),
                 ..Default::default()
             },
+            proxy: ProxyConfig::default(),
         }
     }
 }
@@ -134,6 +144,10 @@ impl AppConfig {
 
         for candidate in split_allowed_urls(&self.allowed_base_urls) {
             parse_base_url(candidate)?;
+        }
+
+        if self.proxy.enabled {
+            validate_proxy_url(&self.proxy.url)?;
         }
 
         Ok(())
@@ -447,6 +461,7 @@ mod tests {
         );
         assert!(loaded.desktop_notification.enabled);
         assert_eq!(loaded.server_chan, ServerChanConfig::default());
+        assert_eq!(loaded.proxy, ProxyConfig::default());
         assert_eq!(
             loaded.schedule,
             ScheduleConfig::Daily {
@@ -579,6 +594,55 @@ mod tests {
             every_days: 1,
         };
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn disabled_proxy_accepts_empty_url() {
+        let temp = tempfile::tempdir().expect("create temp dir");
+        let mut config = valid_config(temp.path());
+        config.proxy.enabled = false;
+        config.proxy.url = String::new();
+        config
+            .validate()
+            .expect("disabled proxy with empty url is valid");
+    }
+
+    #[test]
+    fn enabled_proxy_requires_a_valid_url() {
+        let temp = tempfile::tempdir().expect("create temp dir");
+        let mut config = valid_config(temp.path());
+        config.proxy.enabled = true;
+
+        config.proxy.url = String::new();
+        assert!(config.validate().is_err());
+
+        config.proxy.url = "ftp://127.0.0.1:7890".to_string();
+        assert!(config.validate().is_err());
+
+        config.proxy.url = "http://".to_string();
+        assert!(config.validate().is_err());
+
+        config.proxy.url = "http://127.0.0.1:7890".to_string();
+        config.validate().expect("valid http proxy url accepted");
+
+        config.proxy.url = "socks5://127.0.0.1:1080".to_string();
+        config.validate().expect("valid socks5 proxy url accepted");
+    }
+
+    #[test]
+    fn serialized_config_proxy_field_is_url_only_and_carries_no_password() {
+        let temp = tempfile::tempdir().expect("create temp dir");
+        let mut config = valid_config(temp.path());
+        config.proxy.enabled = true;
+        // set_proxy 命令会在保存前用 extract_proxy_password 剥离密码，因此落盘的 url 不含密码。
+        config.proxy.url = "http://user@127.0.0.1:7890".to_string();
+
+        let serialized = serde_json::to_string(&config).expect("serialize config");
+
+        assert!(serialized.contains("proxy"));
+        assert!(serialized.contains("http://user@127.0.0.1:7890"));
+        assert!(!serialized.to_ascii_lowercase().contains("password"));
+        assert!(!serialized.contains(":secret@"));
     }
 
     #[tokio::test]
